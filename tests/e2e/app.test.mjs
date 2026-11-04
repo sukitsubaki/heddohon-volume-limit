@@ -560,6 +560,10 @@ describe('settings', () => {
 		assert.equal(response.status, 200, explain('settings page failed'));
 		assert.match(html, /Settings/);
 		assert.equal(subsonic.calls.get('getUser'), 1);
+		// A row is a label and a control: the profile name has no hint line
+		// under it (#273), as #243 left every other field.
+		assert.match(html, /id="profile-name"/);
+		assert.doesNotMatch(html, /the public link reads/);
 	});
 
 	test('a settings tab is chosen by the address, with the other groups hidden but still in the form', async () => {

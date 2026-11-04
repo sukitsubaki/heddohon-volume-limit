@@ -1150,7 +1150,6 @@
 					</button>
 				</form>
 			</div>
-			<p class="hh-muted note-inline">Without one, the public link reads Listener.</p>
 
 			<div class="row">
 				<span class="label">Picture</span>
