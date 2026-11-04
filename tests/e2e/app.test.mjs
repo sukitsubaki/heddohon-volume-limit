@@ -560,6 +560,10 @@ describe('settings', () => {
 		assert.equal(response.status, 200, explain('settings page failed'));
 		assert.match(html, /Settings/);
 		assert.equal(subsonic.calls.get('getUser'), 1);
+		// A row is a label and a control: the profile name has no hint line
+		// under it (#273), as #243 left every other field.
+		assert.match(html, /id="profile-name"/);
+		assert.doesNotMatch(html, /the public link reads/);
 	});
 
 	test('a settings tab is chosen by the address, with the other groups hidden but still in the form', async () => {
@@ -2482,6 +2486,25 @@ describe('playing things', () => {
 			assert.equal(ownArt.coverArt, 'mf-s0a', 'a file with its own art keeps its own cover');
 		} finally {
 			subsonic.state.folderArt.delete('s1a');
+		}
+	});
+
+	test('a restored queue names a cover with its image hash, as Navidrome does, so new art is a new id', async () => {
+		// Navidrome's Subsonic answer sends `mf-<id>_<imageHash>`. Without the
+		// hash the same cover was cached under two ids, and the bare one never
+		// saw new art (#272).
+		const ids = ['s0a', 's1a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+		subsonic.state.imageHashes.set('s0a', '0123456789abcdef');
+		try {
+			const restore = async () => (await (await user.json('/api/songs', 'POST', { ids })).json()).songs[0];
+			const first = await restore();
+			assert.equal(first.coverArt, 'mf-s0a_0123456789abcdef');
+			subsonic.state.imageHashes.set('s0a', 'fedcba9876543210');
+			assert.equal((await restore()).coverArt, 'mf-s0a_fedcba9876543210', 'new art kept the old id');
+			// The music server still answers the id with its hash.
+			assert.equal((await user.request(`/api/cover/${first.coverArt}?size=64`)).status, 200);
+		} finally {
+			subsonic.state.imageHashes.delete('s0a');
 		}
 	});
 

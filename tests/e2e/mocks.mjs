@@ -240,6 +240,8 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 		 * the file's own year, as a remaster carries both.
 		 */
 		folderArt: new Set(),
+		/** Navidrome's `imageHash` per song id, sent in its own API's answer, as 0.64.2 does. */
+		imageHashes: new Map(),
 		reissues: new Set(),
 		/** Answer `POST /auth/login` with 429, as Navidrome's limit on sign-ins does. */
 		loginLimited: false,
@@ -315,6 +317,7 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 			...(state.reissues.has(s.id) ? { originalYear: 1973 } : {}),
 			genre: s.genre ?? '',
 			hasCoverArt: !state.folderArt.has(s.id),
+			...(state.imageHashes.has(s.id) ? { imageHash: state.imageHashes.get(s.id) } : {}),
 			size: s.size,
 			suffix: s.suffix,
 			bitRate: s.bitRate,
@@ -761,7 +764,8 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 				// mock's songs carry their album's cover, which is the id its
 				// colours and types are kept under.
 				const asked = p.get('id') ?? '';
-				const id = /^mf-s\d+[ab]$/.test(asked) ? song(index(asked.slice(3)), asked.endsWith('b') ? 'b' : 'a').coverArt : asked;
+				const own = /^mf-(s\d+([ab]))(?:_[0-9a-f]+)?$/.exec(asked);
+				const id = own ? song(index(own[1].slice(1)), own[2]).coverArt : asked;
 				if (id === 'html') {
 					res.setHeader('content-type', 'text/html');
 					return res.end('<script>parent.stolen = document.cookie</script>');
