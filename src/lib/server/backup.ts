@@ -23,6 +23,7 @@ import Database from 'better-sqlite3';
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from './config';
+import { SALT_FILE } from './crypto';
 import { store } from './db';
 import { APP_VERSION } from './version';
 import { zip } from './zip';
@@ -125,13 +126,13 @@ export async function makeBackup(): Promise<Backup> {
 		// This install's key salt, when it has one, or the archive restores to a
 		// database nothing can open. An install from before the salt has no file,
 		// and its backup restores the way it always did.
-		const salt = await readFile(join(config().dataDir, 'crypto-salt')).catch(() => null);
+		const salt = await readFile(join(config().dataDir, SALT_FILE)).catch(() => null);
 		return {
 			name: `heddohon-backup-${madeAt.slice(0, 19).replace(/:/g, '-')}Z.zip`,
 			zip: zip(
 				[
 					{ name: 'heddohon.db', data: await readFile(file) },
-					...(salt ? [{ name: 'crypto-salt', data: salt }] : []),
+					...(salt ? [{ name: SALT_FILE, data: salt }] : []),
 					{ name: 'backup.json', data: text(`${JSON.stringify(manifest, null, '\t')}\n`) },
 					{ name: 'README.txt', data: text(readme(madeAt, database.kind)) }
 				],
