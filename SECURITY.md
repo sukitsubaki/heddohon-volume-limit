@@ -499,7 +499,17 @@ accounts and open nothing.
 ## Credentials at rest
 
 - Upstream credentials are sealed with **AES-256-GCM** before they reach the database.
-- Keys are derived with **scrypt** (N = 2¹⁵, r = 8, p = 1) from `HEDDOHON_SECRET`.
+- Keys are derived with **scrypt** (N = 2¹⁵, r = 8, p = 1) from `HEDDOHON_SECRET`
+  and a salt of the install's own: 32 random bytes in `crypto-salt` in the data
+  directory, made on the first start whose database holds no account, written
+  0600, never regenerated, and packed into a database backup beside
+  `heddohon.db`. The database records which salt sealed it (a row in `meta`
+  holding a SHA-256 of the salt, or `constant`), on SQLite and PostgreSQL alike.
+  An install whose database already held accounts when this was added keeps the
+  constant salt it was written with, rather than being locked out. A salt file
+  that is missing, cannot be parsed, or does not match that record is refused
+  at start, never replaced: the server answers 500 and `/healthz` reports
+  `misconfigured` until the right `crypto-salt` is restored.
   Separate keys cover encryption, session digests, share-link digests,
   known-device cookies, Last.fm link state, cast addresses, the comparison
   of the Navidrome plugin's token and MCP token digests.
@@ -1803,7 +1813,6 @@ session token and any `u`, `t`, `s` or `p` query parameter.
   Trusted Web Activity) and takes passkeys as Chrome does.
 - **Upstream redirects from http to https** are followed to any port on the
   same host, so that Jellyfin's 8096 to 8920 upgrade works.
-- **The scrypt salt** is a constant shared by every deployment.
 - **A cover that misses the cache** is read into memory before its size is checked.
 - **A listen-together link can still be filled for visitors without an
   account** by someone holding it from many addresses, or from one address

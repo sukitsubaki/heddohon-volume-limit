@@ -8,6 +8,7 @@
  * state (settings, credentials) says so and puts it back.
  */
 import assert from 'node:assert/strict';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2535,24 +2536,45 @@ describe('playing things', () => {
 		}
 	});
 
-	test('a lookup after a sign-in that answered nothing gets a session again', async () => {
+	test('a lookup after a sign-in the music server failed to answer gets a session again', async () => {
 		// The lookup above left no session behind: its sign-in was limited, and
-		// a sign-in that fails is not kept. A server that is not Navidrome
-		// answers `/auth/login` with 404, and that null used to be held for
-		// half an hour, so every later call had no session and made no request.
-		const active = subsonic.state.navidrome;
+		// a sign-in that fails is not kept. A 503 from a Navidrome that is
+		// starting is not kept either: held, every later call for half an hour
+		// had no session and made no request.
 		const ids = ['s3b', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
-		subsonic.state.navidrome = null;
+		subsonic.state.loginFailing = true;
 		try {
 			const fallback = await user.json('/api/songs', 'POST', { ids });
 			assert.equal(fallback.status, 200, 'the queue falls back to the per-id calls');
 		} finally {
-			subsonic.state.navidrome = active;
+			subsonic.state.loginFailing = false;
 		}
 		subsonic.calls.reset();
 		const again = await user.json('/api/songs', 'POST', { ids });
 		assert.equal(again.status, 200);
 		assert.equal(subsonic.calls.get('/api/song'), 1, 'the batch is asked for again');
+	});
+
+	test('a server that is not Navidrome is asked to sign in once, not before every call', async () => {
+		// An account of its own, so no token from the tests above is held for it.
+		subsonic.state.others.set('gonicuser', 'gonicpass');
+		const active = subsonic.state.navidrome;
+		subsonic.state.navidrome = null;
+		try {
+			const client = new Client(app.url);
+			assert.equal((await client.signIn({ username: 'gonicuser', password: 'gonicpass', backend: 'subsonic' })).status, 303);
+			subsonic.calls.reset();
+			const ids = ['s3b', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+			for (let i = 0; i < 3; i++) {
+				assert.equal((await client.json('/api/songs', 'POST', { ids })).status, 200);
+			}
+			// Each sign-in carries the password, so one per restored queue sent it
+			// three times here (#271).
+			assert.equal(subsonic.calls.get('/auth/login'), 1, `${subsonic.calls.get('/auth/login')} sign-ins for 3 lookups`);
+		} finally {
+			subsonic.state.navidrome = active;
+			subsonic.state.others.delete('gonicuser');
+		}
 	});
 
 	test('a server that is not Navidrome is read one track at a time', async () => {
@@ -3577,7 +3599,11 @@ describe('sessions ending', () => {
 			['/api/playlists/pl1/tracks', 'POST', { songIds: ['s1a'] }],
 			['/api/playlists/pl1/tracks', 'DELETE', { indices: [0] }],
 			['/api/playlists/pl1/export', 'GET', undefined],
-			['/api/download/s1a', 'GET', undefined]
+			['/api/download/s1a', 'GET', undefined],
+			// These four mapped the refusal by hand before the helper answered it.
+			['/api/playlists/smart', 'POST', { name: 'Refused', rules: { match: 'all', rules: [{ field: 'playcount', op: 'gt', value: 3 }], sort: 'lastplayed', order: 'desc', limit: 50 } }],
+			['/api/playlists/match', 'POST', { tracks: [{ title: 'Song', artist: 'Artist' }] }],
+			['/api/shares', 'POST', { kind: 'song', id: 's1a', days: 1 }]
 		];
 		// Play reports are only sent when the account asks for them, so it is on
 		// for this test whatever the ones before it left.
@@ -3592,9 +3618,14 @@ describe('sessions ending', () => {
 				const client = new Client(app.url);
 				await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' });
 				subsonic.state.password = 'changed-upstream';
+				// Navidrome keeps a session token past a password change, so the
+				// smart playlist call would go through on one held from earlier.
+				subsonic.state.navidrome.acceptFrom = subsonic.state.navidrome.issued + 1;
 				try {
-					if (data === undefined) await client.request(path, { method });
-					else await client.json(path, method, data);
+					const answer = data === undefined ? await client.request(path, { method }) : await client.json(path, method, data);
+					// The answer itself says so, or the player reads the refusal as the
+					// music server failing and keeps going (#270).
+					assert.equal(answer.status, 401, `${method} ${path} answered ${answer.status} for a refused credential`);
 					// Settings is answered from this database, so it says whether the
 					// session is still there without asking the music server. A handler
 					// that left it alive answers 200 here.
@@ -3772,6 +3803,271 @@ describe('signed in on', () => {
  * read here by the format, not by this tree's own writer: the directory at
  * the end, then each file's header, then its bytes inflated.
  */
+/**
+ * The derivation this build used before the key salt existed, written out here
+ * because the tests have to hold exactly what an install from that build holds:
+ * a constant salt per purpose, and nothing in the data directory.
+ */
+const E2E_SECRET = 'e2e-secret-0123456789abcdef0123456789';
+const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 96 * 1024 * 1024 };
+const saltOf = (text) => createHash('sha256').update(text).digest();
+
+const constantKey = (purpose) => scryptSync(E2E_SECRET, saltOf(`heddohon:v1:${purpose}`), 32, SCRYPT);
+
+const installKey = (hex, purpose) =>
+	scryptSync(E2E_SECRET, createHash('sha256').update(Buffer.from(hex, 'hex')).update(`:v1:${purpose}`).digest(), 32, SCRYPT);
+
+const sealWith = (key, text) => {
+	const iv = randomBytes(12);
+	const cipher = createCipheriv('aes-256-gcm', key, iv);
+	const body = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+	return `v1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${body.toString('base64url')}`;
+};
+
+const openWith = (key, blob) => {
+	const [, iv, tag, body] = blob.split('.');
+	const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
+	decipher.setAuthTag(Buffer.from(tag, 'base64url'));
+	return Buffer.concat([decipher.update(Buffer.from(body, 'base64url')), decipher.final()]).toString('utf8');
+};
+
+const digestWith = (key, token) => createHmac('sha256', key).update(token).digest('base64url');
+
+/** Which salt a stopped install's SQLite database says it was sealed with. */
+const saltRow = async (dir) => {
+	const { default: Database } = await import('better-sqlite3');
+	const database = new Database(join(dir, 'heddohon.db'), { readonly: true });
+	try {
+		return database.prepare("SELECT value FROM meta WHERE key = 'key_salt'").get()?.value ?? null;
+	} finally {
+		database.close();
+	}
+};
+
+describe('the key salt', () => {
+	test('a fresh data directory gets its own, and a restart keeps it', async () => {
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url });
+		const client = new Client(app.url);
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const file = join(app.dataDir, 'crypto-salt');
+			const salt = readFileSync(file, 'utf8').trim();
+			assert.match(salt, /^[0-9a-f]{64}$/, 'the salt is not 32 bytes written as hex');
+			assert.equal(statSync(file).mode & 0o777, 0o600, 'the salt is readable by more than this user');
+
+			await app.stop({ keepData: true });
+			const again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: app.dataDir });
+			// Same port is not promised, so the client moves with its cookies.
+			client.base = again.url;
+			try {
+				assert.equal(readFileSync(join(again.dataDir, 'crypto-salt'), 'utf8').trim(), salt, 'the restart made a new salt');
+				assert.equal((await client.request('/api/settings')).status, 200, 'the stored session no longer opens');
+				// The sealed credential opens as well, which a changed salt stops.
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the stored credential no longer opens'
+				);
+			} finally {
+				await again.stop();
+			}
+		} finally {
+			await app.stop();
+		}
+	});
+
+	test('an install from before the salt keeps working, on the constant one', async () => {
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url });
+		const client = new Client(app.url);
+		let kept = null;
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const salt = readFileSync(join(app.dataDir, 'crypto-salt'), 'utf8').trim();
+			const token = client.cookies.get('heddohon_session');
+			assert.ok(token, 'the sign-in left no session cookie');
+			await app.stop({ keepData: true });
+			kept = app.dataDir;
+
+			// What that build held: the credential sealed with the constant salt,
+			// the session digested with it, and no salt file at all.
+			const { default: Database } = await import('better-sqlite3');
+			const database = new Database(join(kept, 'heddohon.db'));
+			try {
+				const accounts = database.prepare('SELECT id, credential FROM accounts').all();
+				assert.ok(accounts.length > 0, 'the sign-in left no account');
+				for (const account of accounts) {
+					const plain = openWith(installKey(salt, 'credential'), account.credential);
+					database
+						.prepare('UPDATE accounts SET credential = ? WHERE id = ?')
+						.run(sealWith(constantKey('credential'), plain), account.id);
+				}
+				const stored = digestWith(installKey(salt, 'session'), token);
+				const legacy = digestWith(constantKey('session'), token);
+				assert.equal(database.prepare('UPDATE sessions SET token_digest = ? WHERE token_digest = ?').run(legacy, stored).changes, 1);
+				// That build kept no record of the salt either.
+				assert.equal(database.prepare("DELETE FROM meta WHERE key = 'key_salt'").run().changes, 1);
+			} finally {
+				database.close();
+			}
+			rmSync(join(kept, 'crypto-salt'));
+
+			const again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 200, 'the stored session no longer opens');
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the credential sealed by the earlier build no longer opens'
+				);
+				assert.equal(existsSync(join(kept, 'crypto-salt')), false, 'a salt was made for an install that predates it');
+			} finally {
+				await again.stop({ keepData: true });
+			}
+			assert.equal((await saltRow(kept)), 'constant', 'the constant salt was not recorded in the database');
+		} finally {
+			await app.stop();
+			if (kept) rmSync(kept, { recursive: true, force: true });
+		}
+	});
+
+	test('a salted install that has lost its salt is refused, and is not moved to the constant one', async () => {
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url });
+		const client = new Client(app.url);
+		let kept = null;
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const salt = readFileSync(join(app.dataDir, 'crypto-salt'), 'utf8');
+			await app.stop({ keepData: true });
+			kept = app.dataDir;
+			const recorded = (await saltRow(kept));
+			assert.match(recorded, /^own:[0-9a-f]{64}$/, 'the database does not say which salt sealed it');
+
+			// A restore of heddohon.db that left the salt behind.
+			rmSync(join(kept, 'crypto-salt'));
+			let again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept, healthy: false });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 500);
+				// Signing in again would seal the credential with a salt the database
+				// was not sealed with.
+				assert.equal((await new Client(again.url).signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 500);
+				assert.equal((await (await fetch(`${again.url}/healthz`)).json()).status, 'misconfigured');
+				assert.equal(existsSync(join(kept, 'crypto-salt')), false, 'a new salt was made in place of the lost one');
+				assert.match(again.output(), /crypto-salt is missing/);
+			} finally {
+				await again.stop({ keepData: true });
+			}
+			assert.equal((await saltRow(kept)), recorded, 'the record of the salt was changed');
+
+			// Another install's salt in its place is refused as well.
+			writeFileSync(join(kept, 'crypto-salt'), `${randomBytes(32).toString('hex')}\n`, { mode: 0o600 });
+			again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept, healthy: false });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 500);
+			} finally {
+				await again.stop({ keepData: true });
+			}
+
+			// The right one put back, everything opens as it did.
+			writeFileSync(join(kept, 'crypto-salt'), salt, { mode: 0o600 });
+			again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 200, 'the restored salt does not open the session');
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the restored salt does not open the credential'
+				);
+			} finally {
+				await again.stop();
+			}
+		} finally {
+			await app.stop();
+			if (kept) rmSync(kept, { recursive: true, force: true });
+		}
+	});
+
+	/*
+	 * PostgreSQL holds the accounts, and the data directory holds neither them
+	 * nor setup.json. Run with HH_E2E_POSTGRES_URL pointing at an empty
+	 * database the test may use; skipped without it.
+	 */
+	test('a PostgreSQL install from before the salt keeps the constant one', { skip: !process.env.HH_E2E_POSTGRES_URL }, async () => {
+		const pgEnv = { HEDDOHON_DATABASE_URL: process.env.HH_E2E_POSTGRES_URL };
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, env: pgEnv });
+		const client = new Client(app.url);
+		let kept = null;
+		const { default: pg } = await import('pg');
+		const pool = new pg.Pool({ connectionString: process.env.HH_E2E_POSTGRES_URL, options: '-c search_path=heddohon' });
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const salt = readFileSync(join(app.dataDir, 'crypto-salt'), 'utf8').trim();
+			const token = client.cookies.get('heddohon_session');
+			await app.stop({ keepData: true });
+			kept = app.dataDir;
+
+			// What that build held, as in the SQLite test above, with no record of
+			// the salt and nothing of it in the data directory.
+			for (const account of (await pool.query('SELECT id, credential FROM accounts')).rows) {
+				const plain = openWith(installKey(salt, 'credential'), account.credential);
+				await pool.query('UPDATE accounts SET credential = $1 WHERE id = $2', [sealWith(constantKey('credential'), plain), account.id]);
+			}
+			const moved = await pool.query('UPDATE sessions SET token_digest = $1 WHERE token_digest = $2', [
+				digestWith(constantKey('session'), token),
+				digestWith(installKey(salt, 'session'), token)
+			]);
+			assert.equal(moved.rowCount, 1);
+			await pool.query("DELETE FROM meta WHERE key = 'key_salt'");
+			rmSync(join(kept, 'crypto-salt'));
+
+			const again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, env: pgEnv, dataDir: kept });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 200, 'the stored session no longer opens');
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the credential sealed by the earlier build no longer opens'
+				);
+				assert.equal(existsSync(join(kept, 'crypto-salt')), false, 'a salt was made for an install that predates it');
+			} finally {
+				await again.stop();
+			}
+			const row = await pool.query("SELECT value FROM meta WHERE key = 'key_salt'");
+			assert.equal(row.rows[0]?.value, 'constant');
+		} finally {
+			await app.stop();
+			if (kept) rmSync(kept, { recursive: true, force: true });
+			await pool.query('DROP SCHEMA IF EXISTS heddohon CASCADE').catch(() => {});
+			await pool.end();
+		}
+	});
+
+	test('a salt that cannot be read is not replaced by a new one', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'heddohon-e2e-salt-'));
+		try {
+			writeFileSync(join(dir, 'crypto-salt'), 'not a salt\n');
+			const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: dir, healthy: false });
+			try {
+				// A presented session is digested before anything is read, so this is
+				// the first derivation, and it has to fail rather than pick a new salt.
+				const response = await new Client(app.url).request('/api/settings', {
+					headers: { cookie: 'heddohon_session=nonsense' }
+				});
+				assert.equal(response.status, 500);
+				assert.equal(readFileSync(join(dir, 'crypto-salt'), 'utf8'), 'not a salt\n', 'the bad salt was overwritten');
+			} finally {
+				await app.stop();
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe('a backup of the database', () => {
 	// The session tests above end every older session of the account, the shared
 	// client's among them.
@@ -3843,7 +4139,7 @@ describe('a backup of the database', () => {
 				response.headers.get('content-disposition') ?? '',
 				/^attachment; filename="heddohon-backup-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\dZ\.zip"$/
 			);
-			assert.deepEqual([...files.keys()], ['heddohon.db', 'backup.json', 'README.txt']);
+			assert.deepEqual([...files.keys()], ['heddohon.db', 'crypto-salt', 'backup.json', 'README.txt']);
 
 			const dir = mkdtempSync(join(tmpdir(), 'heddohon-e2e-backup-'));
 			writeFileSync(join(dir, 'heddohon.db'), files.get('heddohon.db'));
@@ -3906,6 +4202,9 @@ describe('a backup of the database', () => {
 			const { files } = await backup();
 			const dataDir = mkdtempSync(join(tmpdir(), 'heddohon-e2e-restore-'));
 			writeFileSync(join(dataDir, 'heddohon.db'), files.get('heddohon.db'));
+			// Both, as the archive's README says: without the salt the restored
+			// server refuses to start (the key salt tests above).
+			writeFileSync(join(dataDir, 'crypto-salt'), files.get('crypto-salt'), { mode: 0o600 });
 			restored = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir });
 
 			// The session that made the backup is not in it.
