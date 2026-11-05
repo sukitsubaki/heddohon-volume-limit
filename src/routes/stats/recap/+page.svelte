@@ -226,7 +226,6 @@
 
 <div class="page">
 	<header>
-		<span class="hh-eyebrow">Kept on this server, for you alone</span>
 		<h1 class="hh-display">{title}</h1>
 		<ListeningTabs />
 		<nav class="periods" aria-label="Period">
@@ -374,7 +373,6 @@
 
 		<section class="card" aria-label="A card to share">
 			<h2>A card to share</h2>
-			<p class="hh-muted note">A picture of this {data.month === null ? 'year' : 'month'} in your theme's colours, drawn in this browser.</p>
 			<div class="card-actions">
 				<button class="hh-button hh-button--primary" type="button" onclick={save} disabled={!when}>
 					<Icon name="download" size={16} />
@@ -465,7 +463,7 @@
 	.number {
 		color: var(--text-strong);
 		font-size: 2rem;
-		font-weight: 700;
+		font-weight: 600;
 		line-height: 1.1;
 	}
 
@@ -542,7 +540,7 @@
 
 	.rank {
 		color: var(--accent);
-		font-weight: 700;
+		font-weight: 600;
 		text-align: right;
 	}
 

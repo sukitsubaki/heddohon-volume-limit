@@ -4,15 +4,10 @@
 
 	let {
 		title,
-		/** Two-digit index, printed in the margin like a catalogue entry. */
-		index = null,
-		eyebrow = null,
 		href = null,
 		actions
 	}: {
 		title: string;
-		index?: number | null;
-		eyebrow?: string | null;
 		href?: string | null;
 		actions?: Snippet;
 	} = $props();
@@ -20,18 +15,10 @@
 
 <!--
   A rule runs from the title to the right edge, so a page of shelves reads as a
-  printed index. The number sits outside the text column, in the margin, in
-  mono.
+  printed index.
 -->
 <header class="section-header">
-	{#if index !== null}
-		<span class="index hh-numeric" aria-hidden="true">{String(index).padStart(2, '0')}</span>
-	{/if}
-
 	<div class="titles">
-		{#if eyebrow}
-			<span class="hh-eyebrow">{eyebrow}</span>
-		{/if}
 		{#if href}
 			<a class="link" {href}>
 				<h2>{title}</h2>
@@ -55,14 +42,6 @@
 		align-items: center;
 		gap: var(--space-3);
 		margin-bottom: var(--space-4);
-	}
-
-	.index {
-		font-size: 0.6875rem;
-		color: var(--accent);
-		letter-spacing: 0.08em;
-		padding-top: 0.1rem;
-		flex: none;
 	}
 
 	.titles {
@@ -107,15 +86,11 @@
 	}
 
 	@media (max-width: 40rem) {
-		.index {
-			display: none;
-		}
-
 		/*
 		 * The actions go to a line of their own under the title where the two do
 		 * not fit side by side. Neither can shrink, so on the favourites page,
-		 * with its long eyebrow, "Play these" ran 60px past the right-hand edge
-		 * of a 393px screen.
+		 * with a long line over its title, "Play these" ran 60px past the
+		 * right-hand edge of a 393px screen.
 		 */
 		.section-header {
 			flex-wrap: wrap;
@@ -127,12 +102,6 @@
 	}
 
 	/* ── Terminal ────────────────────────────────────────────────────────────── */
-
-	:global([data-theme='terminal']) .index {
-		font-size: 0.75rem;
-		letter-spacing: 0;
-		padding-top: 0;
-	}
 
 	:global([data-theme='terminal']) .titles :global(h2) {
 		font-size: 0.9375rem;

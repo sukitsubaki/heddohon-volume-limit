@@ -217,6 +217,8 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 			linked: { lastfm: false, listenbrainz: false },
 			issued: 0,
 			acceptFrom: 0,
+			/** Who each issued token belongs to, by its number. */
+			names: new Map(),
 			linkTokens: new Set(),
 			listenBrainzToken: null
 		},
@@ -230,7 +232,21 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 		smart: new Map(),
 		smartSongs: ['s5a', 's6a', 's7a'],
 		smartWrites: [],
-		smartMade: 0
+		smartMade: 0,
+		/**
+		 * Song ids whose art is the album's, not the file's, as a library with
+		 * a `cover.jpg` beside the tracks answers `hasCoverArt: false`. And
+		 * song ids whose record was first released in 1973 and reissued in
+		 * the file's own year, as a remaster carries both.
+		 */
+		folderArt: new Set(),
+		/** Navidrome's `imageHash` per song id, sent in its own API's answer, as 0.64.2 does. */
+		imageHashes: new Map(),
+		reissues: new Set(),
+		/** Answer `POST /auth/login` with 429, as Navidrome's limit on sign-ins does. */
+		loginLimited: false,
+		/** Answer `POST /auth/login` with 503, as a Navidrome that is starting does behind a proxy. */
+		loginFailing: false
 	};
 
 	const name = (i) => `Artist ${String(i).padStart(4, '0')}`;
@@ -278,6 +294,42 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 	const artist = (i) => ({ id: `ar${i}`, name: name(i), albumCount: i === 0 ? 2 : 1, coverArt: `ar-${i}` });
 	const index = (id) => Number.parseInt(String(id).replace(/^\D+/, ''), 10);
 
+	/**
+	 * The same song as Navidrome's own API answers it: `trackNumber`, a cover
+	 * flag rather than a cover id, a starred time of its own, and the
+	 * ReplayGain values flat.
+	 */
+	const navSong = (i, side) => {
+		const s = song(i, side);
+		return {
+			id: s.id,
+			title: s.title,
+			album: s.album,
+			albumId: s.albumId,
+			artist: s.artist,
+			artistId: s.artistId,
+			albumArtist: s.artist,
+			duration: s.duration,
+			trackNumber: s.track,
+			discNumber: s.discNumber ?? 0,
+			year: 2000 + (i % 20),
+			releaseYear: 2000 + (i % 20),
+			...(state.reissues.has(s.id) ? { originalYear: 1973 } : {}),
+			genre: s.genre ?? '',
+			hasCoverArt: !state.folderArt.has(s.id),
+			...(state.imageHashes.has(s.id) ? { imageHash: state.imageHashes.get(s.id) } : {}),
+			size: s.size,
+			suffix: s.suffix,
+			bitRate: s.bitRate,
+			bitDepth: s.bitDepth ?? null,
+			sampleRate: s.samplingRate,
+			channels: 2,
+			...(s.starred ? { starred: true, starredAt: s.starred } : {}),
+			...(s.userRating ? { rating: s.userRating } : {}),
+			...(s.playCount === undefined ? {} : { playCount: s.playCount })
+		};
+	};
+
 	const ok = (extra) => ({ 'subsonic-response': { status: 'ok', version: '1.16.1', ...extra } });
 	const failed = (code, message) => ({
 		'subsonic-response': { status: 'failed', version: '1.16.1', error: { code, message } }
@@ -302,11 +354,19 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 		}
 
 		if (url.pathname === '/auth/login' && req.method === 'POST') {
-			if (sent.username !== state.username || sent.password !== state.password) {
+			// Before the credential check, as Navidrome's limit counts requests
+			// per address whatever they carry.
+			if (state.loginLimited) return reply(429, { error: 'Too Many Requests' });
+			if (state.loginFailing) return reply(503, { error: 'Service Unavailable' });
+			// The same accounts the Subsonic side signs in, and the same
+			// passwords: a Navidrome has one user list.
+			const expected = sent.username === state.username ? state.password : state.others.get(sent.username);
+			if (expected === undefined || sent.password !== expected) {
 				return reply(401, { error: 'Invalid username or password' });
 			}
 			nd.issued += 1;
-			return reply(200, { id: `u-${state.username}`, username: state.username, token: `nd-${nd.issued}` });
+			nd.names.set(`nd-${nd.issued}`, sent.username);
+			return reply(200, { id: `u-${sent.username}`, username: sent.username, token: `nd-${nd.issued}` });
 		}
 		if (url.pathname === '/api/lastfm/link/callback' && nd.enabled.lastfm) {
 			if (!nd.linkTokens.has(url.searchParams.get('uid')) || url.searchParams.get('token') !== 'lastfm-ok') {
@@ -319,6 +379,31 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 		const bearer = /^Bearer nd-(\d+)$/.exec(req.headers['x-nd-authorization'] ?? '');
 		if (!bearer || Number(bearer[1]) < nd.acceptFrom || Number(bearer[1]) > nd.issued) {
 			return reply(401, { error: 'Not authenticated' });
+		}
+		// Whose token it is, for what a user alone may read.
+		const who = nd.names.get(`nd-${bearer[1]}`) ?? state.username;
+		// Songs by id, as Navidrome 0.64.2 answers `/api/song`: the filter's
+		// value is a list of ids, and the answer comes in the server's order,
+		// which is neither the request's nor the library's. Here it is the
+		// reverse, so a caller that keeps the order it asked in is visible.
+		if (url.pathname === '/api/song' && req.method === 'GET') {
+			let filter = {};
+			try {
+				filter = JSON.parse(url.searchParams.get('_filters') ?? '{}');
+			} catch {
+				return reply(500, { error: 'invalid filter' });
+			}
+			const ids = Array.isArray(filter.id) ? filter.id.map(String) : [];
+			const songs = ids
+				.filter((id) => {
+					const i = index(id);
+					return !state.missing.has(id) && !state.hidden.get(who)?.has(id) && i >= 0 && i < artistCount;
+				})
+				.map((id) => navSong(index(id), id.endsWith('b') ? 'b' : 'a'))
+				.reverse();
+			const delay = state.delays.get('/api/song') ?? 0;
+			const answer = () => reply(200, songs);
+			return delay > 0 ? new Promise((resolve) => setTimeout(() => resolve(answer()), delay)) : answer();
 		}
 		// Playlists as Navidrome 0.64.2 answers them, smart ones alone held here:
 		// another user's refused with 403, an unknown id 404, an operator it
@@ -675,7 +760,12 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 			case 'getUser':
 				return send(ok({ user: { username: state.username, adminRole: state.admin } }));
 			case 'getCoverArt': {
-				const id = p.get('id');
+				// Navidrome names a song's cover `mf-` and the song's id. The
+				// mock's songs carry their album's cover, which is the id its
+				// colours and types are kept under.
+				const asked = p.get('id') ?? '';
+				const own = /^mf-(s\d+([ab]))(?:_[0-9a-f]+)?$/.exec(asked);
+				const id = own ? song(index(own[1].slice(1)), own[2]).coverArt : asked;
 				if (id === 'html') {
 					res.setHeader('content-type', 'text/html');
 					return res.end('<script>parent.stolen = document.cookie</script>');
@@ -685,6 +775,8 @@ export async function startSubsonic({ artistCount = 250 } = {}) {
 				return res.end(state.coverPadding ? Buffer.concat([cover, Buffer.alloc(state.coverPadding)]) : cover);
 			}
 			case 'stream': {
+				// A check's own answer, for a stream that fails: true when it has answered.
+				if (state.onStream?.(p.get('id'), req, res)) return;
 				// A function is called for each request: a body that differs from one
 				// read to the next.
 				const audio = state.audio?.body;
@@ -824,7 +916,7 @@ export async function startJellyfin({ quickConnect = false } = {}) {
 	 * whether the one request it holds (secret `qc-secret`, code `123456`) has
 	 * been approved by a signed-in user.
 	 */
-	const state = { played: [], favourites: new Set(), playlistPublic: true, quickConnect, quickConnectApproved: false };
+	const state = { audio: null, played: [], favourites: new Set(), playlistPublic: true, quickConnect, quickConnectApproved: false };
 
 	/** An item as Jellyfin answers with it for this user: with its favourite state. */
 	const withUserData = (item) =>
@@ -852,6 +944,11 @@ export async function startJellyfin({ quickConnect = false } = {}) {
 				send({ AccessToken: 'jf-token', User: { Id: 'u1', Name: 'jfuser' } });
 			});
 			return;
+		}
+		// `{ type, body }` for a check that has to stay on a track; 404 unless set.
+		if (state.audio && /^\/Audio\/[^/]+\/(stream|universal)$/.test(url.pathname)) {
+			res.setHeader('content-type', state.audio.type);
+			return res.end(state.audio.body);
 		}
 		if (url.pathname === '/QuickConnect/Enabled') return send(state.quickConnect);
 		if (state.quickConnect && req.method === 'POST' && url.pathname === '/QuickConnect/Initiate') {
@@ -1156,15 +1253,17 @@ export async function startMusicBrainz() {
 	});
 	const groups = {
 		'b09c8a50-7bfa-434f-a2cf-f9bf9f6f91a5': () => [
-			group('rg-0-new', 'Fresh Start', day(-20)),
+			group('a10c0000-0000-4000-8000-000000000001', 'Fresh Start', day(-20)),
 			// In the library already, live, and old.
-			group('rg-0-owned', 'Album 0', day(-5)),
-			group('rg-0-live', 'Live at Home', day(-3), 'Album', ['Live']),
-			group('rg-0-old', 'Debut', '2001-05-01')
+			group('a10c0000-0000-4000-8000-000000000002', 'Album 0', day(-5)),
+			group('a10c0000-0000-4000-8000-000000000003', 'Live at Home', day(-3), 'Album', ['Live']),
+			group('a10c0000-0000-4000-8000-000000000004', 'Debut', '2001-05-01'),
+			// Not a MusicBrainz id, so not one for the shelf's link.
+			group('rg-not-an-id', 'Not An Id', day(-1))
 		],
 		'33333333-3333-4333-8333-333333333333': () => [
-			group('rg-3-soon', 'Next One', day(40), 'EP'),
-			group('rg-3-single', 'A Single', day(-2), 'Single')
+			group('33333333-3333-4333-8333-000000000001', 'Next One', day(40), 'EP'),
+			group('33333333-3333-4333-8333-000000000002', 'A Single', day(-2), 'Single')
 		]
 	};
 	const server = await listen((req, res) => {
@@ -1185,7 +1284,8 @@ export async function startMusicBrainz() {
 			);
 		}
 		if (url.pathname === '/ws/2/release-group') {
-			const listed = groups[url.searchParams.get('artist')]?.() ?? [];
+			const artist = url.searchParams.get('artist') ?? '';
+			const listed = Object.hasOwn(groups, artist) ? groups[artist]() : [];
 			return res.end(JSON.stringify({ 'release-group-count': listed.length, 'release-groups': listed }));
 		}
 		res.statusCode = 404;

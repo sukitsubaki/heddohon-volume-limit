@@ -71,7 +71,6 @@
 <div class="page">
 	<header>
 		<div>
-			<span class="hh-eyebrow">Library</span>
 			<h1>Artists</h1>
 			<p class="meta hh-numeric hh-muted">
 				{data.libraryTotal.toLocaleString()} artist{data.libraryTotal === 1 ? '' : 's'}
@@ -117,7 +116,7 @@
 
 		<Pager {...data} href={pageHref} label="Artist pages" noun="artists" />
 	{:else}
-		<p class="empty hh-muted">No artists matched “{data.query}”.</p>
+		<p class="empty hh-muted">No artists matched “{data.query}”</p>
 	{/if}
 </div>
 

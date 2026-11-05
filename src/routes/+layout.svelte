@@ -276,9 +276,10 @@
 	 * account to another device. Only ids are stored, and the metadata is
 	 * fetched here, so a re-tagged track shows its current details.
 	 *
-	 * The current track is looked up first and shown, and the rest follows. On
-	 * Subsonic every id is its own upstream call, eight at a time, so a queue
-	 * of 1000 tracks held the player empty until the last call answered.
+	 * The current track is looked up first and shown, and the rest follows. A
+	 * queue of 1000 tracks held the player empty until the last call answered,
+	 * every id being its own upstream call, eight at a time; on Navidrome the
+	 * rest is now one request per 100 tracks.
 	 *
 	 * A queue the listener starts while the lookups are out wins: the saved one
 	 * is put in only if the player still holds what it held at the start.
@@ -694,9 +695,30 @@
 		if (type !== 'enter') settleStarred();
 	});
 
+	/*
+	 * Whether the sheet was on screen when the current navigation began.
+	 *
+	 * A sheet opened after that belongs to the page being loaded: its entry has
+	 * to be made on the arriving page, not on the one being left. A sheet that
+	 * was open when the navigation began (a link followed from inside it) goes
+	 * down with the page.
+	 */
+	let sheetAtNavigationStart = false;
+	beforeNavigate(() => {
+		sheetAtNavigationStart = player.panelOpen;
+	});
+
 	afterNavigate(({ type }) => {
 		// Back to an entry the sheet was open over leaves it to the effect below.
 		if (type === 'enter' || !player.sheetLayout || !player.panelOpen || page.state.sheet) return;
+		// The router pushes the arriving page's entry once its data has loaded,
+		// so a sheet entry made during the load belonged to the page being left,
+		// and the arriving page found none and shut the sheet. Mark the arriving
+		// page instead, and the sheet stays up.
+		if (!sheetAtNavigationStart) {
+			pushState('', { ...page.state, sheet: true });
+			return;
+		}
 		player.togglePanel();
 	});
 
@@ -721,6 +743,10 @@
 		const phone = player.sheetLayout && player.viewportKnown;
 		untrack(() => {
 			if (!phone || !signedIn) return;
+			// A push during a load belongs to the page being left and is left
+			// behind when the router pushes the arriving page's own entry. The
+			// arriving page is marked in afterNavigate.
+			if (navigating.to && open) return;
 			if (open && !page.state.sheet && !leaving) pushState('', { ...page.state, sheet: true });
 			else if (!open && page.state.sheet && !leaving) {
 				leaving = true;
@@ -737,7 +763,11 @@
 				if (player.panelOpen) pushState('', { ...page.state, sheet: true });
 				return;
 			}
-			if (marked !== player.panelOpen) player.togglePanel();
+			if (marked !== player.panelOpen) {
+				// The arriving page has no entry until afterNavigate marks it.
+				if (navigating.to && player.panelOpen) return;
+				player.togglePanel();
+			}
 		});
 	});
 
@@ -1045,7 +1075,9 @@
 		height: 100%;
 		border-radius: inherit;
 		background: var(--accent);
-		box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
+	}
+
+	.nav-progress.waiting span {
 		animation: nav-sweep 1.1s var(--ease-colour) infinite;
 	}
 
@@ -1545,6 +1577,9 @@
 		.nav-progress span {
 			width: 100%;
 			opacity: 0.6;
+		}
+
+		.nav-progress.waiting span {
 			animation: none;
 		}
 	}
@@ -1567,11 +1602,6 @@
 		:global([data-theme='terminal']) .app .wait-veil {
 			border-radius: var(--r-xl);
 		}
-	}
-
-	/* The line that sweeps while a page loads, without its glow. */
-	:global([data-theme='terminal']) .nav-progress span {
-		box-shadow: none;
 	}
 
 	/* The page arrives without the rise: the rows of its lists print in instead

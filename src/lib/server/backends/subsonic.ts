@@ -25,6 +25,7 @@ import {
 	setSmartPlaylistRules,
 	smartPlaylistIds,
 	smartPlaylistRules,
+	songsByIds,
 	startLastfm,
 	unlinkScrobbler
 } from './navidrome';
@@ -59,6 +60,14 @@ import type {
 const API_VERSION = '1.16.1';
 /** The `c` parameter: what the music server knows this client as. `plugin.ts` knows its own plays by it. */
 export const CLIENT_NAME = 'heddohon';
+
+/**
+ * How many ids a lookup needs before Navidrome's own API is asked for them in
+ * one request (`songsByIds`). From this many the per-id calls open 8 at once
+ * (`UPSTREAM_FANOUT`), so the batch saves requests as well as time; a restored
+ * queue, the case this is for, is far above it.
+ */
+const NATIVE_BATCH = 8;
 
 interface SubsonicEnvelope<T = Record<string, unknown>> {
 	'subsonic-response': T & {
@@ -271,6 +280,84 @@ function toSong(raw: Record<string, any>): Song {
 		rating: ratingOf(raw.userRating),
 		quality: quality(raw),
 		replayGain: replayGainOf(raw.replayGain)
+	};
+}
+
+/**
+ * A song as Navidrome's own API answers it, as a `Song`.
+ *
+ * The names differ from Subsonic's child: `trackNumber`, `discNumber` with 0
+ * for none, `hasCoverArt` instead of a cover id, the listener's annotations
+ * present only when set, and the ReplayGain values flat rather than under
+ * `replayGain`.
+ *
+ * `hasCoverArt` says only whether the file carries its own picture, so the
+ * cover is built the way Navidrome's Subsonic answer builds it: the file's
+ * art, else the disc's, else the album's. This answer does not say whether
+ * the album has art, so a library whose albums carry none asks for a cover
+ * that is not there; the cover route answers that as it answers any cover the
+ * music server does not have, and nothing is written to the cache for it.
+ *
+ * The file's and the disc's ids carry `_` and the track's `imageHash`, as
+ * Navidrome's Subsonic answer does (`MediaFile.CoverArtID` in 0.64.2): without
+ * it one cover was cached under two ids, and new art never replaced the copy
+ * kept under the bare one (#272). The album's id takes the album's hash, which
+ * this answer does not carry, so a track with no disc number keeps the bare
+ * `al-` id.
+ *
+ * `year` is the file's own year, which is the value Subsonic sends as `year`.
+ * `originalYear` is the record's first release, so preferring it dated a 2011
+ * remaster of a 1973 album 1973 in a restored queue and 2011 on the per-id
+ * path.
+ */
+function coverArtOf(raw: Record<string, unknown>, id: string, disc: number | null): string | null {
+	const hash = typeof raw.imageHash === 'string' && raw.imageHash !== '' ? `_${raw.imageHash}` : '';
+	if (raw.hasCoverArt === true) return `mf-${id}${hash}`;
+	const albumId = typeof raw.albumId === 'string' && raw.albumId !== '' ? raw.albumId : null;
+	if (albumId === null) return null;
+	return disc !== null && disc > 0 ? `dc-${albumId}:${disc}${hash}` : `al-${albumId}`;
+}
+
+function fromNative(raw: Record<string, unknown>): Song {
+	const id = String(raw.id);
+	const disc = numberOrNull(raw.discNumber);
+	const year =
+		[raw.year, raw.releaseYear, raw.originalYear]
+			.map((candidate) => numberOrNull(candidate))
+			.find((candidate) => candidate !== null && candidate > 0) ?? null;
+	const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : null);
+	return {
+		id,
+		title: text(raw.title) ?? 'Unknown title',
+		albumId: raw.albumId ? String(raw.albumId) : null,
+		album: text(raw.album),
+		artistId: raw.artistId ? String(raw.artistId) : null,
+		artist: text(raw.artist),
+		albumArtist: text(raw.albumArtist),
+		duration: numberOrNull(raw.duration) ?? 0,
+		track: numberOrNull(raw.trackNumber),
+		disc: disc !== null && disc > 0 ? disc : null,
+		year,
+		genre: text(raw.genre),
+		coverArt: coverArtOf(raw, id, disc),
+		starred: raw.starred === true,
+		starredAt: starredAt(raw.starredAt),
+		playCount: numberOrNull(raw.playCount),
+		rating: ratingOf(raw.rating),
+		quality: quality({
+			suffix: raw.suffix,
+			bitRate: raw.bitRate,
+			bitDepth: raw.bitDepth,
+			samplingRate: raw.sampleRate,
+			channelCount: raw.channels,
+			size: raw.size
+		}),
+		replayGain: replayGainOf({
+			trackGain: raw.rgTrackGain,
+			albumGain: raw.rgAlbumGain,
+			trackPeak: raw.rgTrackPeak,
+			albumPeak: raw.rgAlbumPeak
+		})
 	};
 }
 
@@ -840,23 +927,51 @@ export const subsonicBackend: MediaBackend = {
 	},
 
 	async getSongs(cred, ids) {
-		// One call per id, since Subsonic has no batch lookup, bounded since the
-		// caller may pass 1000.
+		// Navidrome answers many ids in one request, so a queue restored on it
+		// costs one request per 100 tracks instead of one per track. Below
+		// `NATIVE_BATCH` ids the Subsonic API answers instead: a session with
+		// Navidrome costs a sign-in against a limit per address that every
+		// account here shares, and a single lookup, as the plugin makes for a
+		// reported play, is not worth one. The Subsonic call is also what
+		// refuses a credential that no longer signs in.
 		//
-		// A track removed from the library answers error 70 and is left out, as
-		// Jellyfin leaves it out of a batch. Rethrown, it rejected the lookup and
-		// a saved queue holding one deleted track did not restore. Any other
-		// failure still rejects.
-		const songs = await mapLimited(ids, async (id) => {
+		// An id the batch leaves out is a track removed from the library, or
+		// the whole list on a server with no batch lookup; both are looked up
+		// one at a time. A removed track answers error 70 and is left out, as
+		// Jellyfin leaves it out of a batch. Rethrown, it rejected the lookup
+		// and a saved queue holding one deleted track did not restore. Any
+		// other failure still rejects.
+		//
+		// A sign-in that is refused or limited reaches here as a thrown
+		// `UpstreamError` from `songsByIds`, before any song is read. The
+		// per-id calls below need no session, so the queue still restores;
+		// they are what reports a credential the music server will not take.
+		const found = new Map<string, Song>();
+		if (ids.length >= NATIVE_BATCH) {
 			try {
-				const body = await call<{ song?: Record<string, any> }>(cred, 'getSong.view', { id });
-				return body.song ? toSong(body.song) : null;
+				for (const raw of (await songsByIds(cred, ids)) ?? []) {
+					const song = fromNative(raw);
+					found.set(song.id, song);
+				}
 			} catch (err) {
-				if (err instanceof UpstreamError && err.kind === 'not_found') return null;
-				throw err;
+				if (!(err instanceof UpstreamError)) throw err;
 			}
-		});
-		return songs.filter((song): song is Song => song !== null);
+		}
+
+		const missing = [...new Set(ids.filter((id) => !found.has(id)))];
+		if (missing.length > 0) {
+			const songs = await mapLimited(missing, async (id) => {
+				try {
+					const body = await call<{ song?: Record<string, any> }>(cred, 'getSong.view', { id });
+					return body.song ? toSong(body.song) : null;
+				} catch (err) {
+					if (err instanceof UpstreamError && err.kind === 'not_found') return null;
+					throw err;
+				}
+			});
+			for (const song of songs) if (song) found.set(song.id, song);
+		}
+		return ids.map((id) => found.get(id)).filter((song): song is Song => song !== undefined);
 	},
 
 	async getRandomSongs(cred, limit) {

@@ -8,6 +8,7 @@
  * state (settings, credentials) says so and puts it back.
  */
 import assert from 'node:assert/strict';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -559,6 +560,10 @@ describe('settings', () => {
 		assert.equal(response.status, 200, explain('settings page failed'));
 		assert.match(html, /Settings/);
 		assert.equal(subsonic.calls.get('getUser'), 1);
+		// A row is a label and a control: the profile name has no hint line
+		// under it (#273), as #243 left every other field.
+		assert.match(html, /id="profile-name"/);
+		assert.doesNotMatch(html, /the public link reads/);
 	});
 
 	test('a settings tab is chosen by the address, with the other groups hidden but still in the form', async () => {
@@ -2438,6 +2443,180 @@ describe('playing things', () => {
 		subsonic.state.missing.clear();
 	});
 
+	test('a saved queue on Navidrome is read in one request, in the order it was saved', async () => {
+		subsonic.calls.reset();
+		// The current track first, then the rest, as the page asks for a
+		// restored queue. One batch covers the whole of it, and the queue keeps
+		// the order it was saved in, not the server's: the mock answers a batch
+		// in the reverse of what was asked for.
+		const ids = ['s3b', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b', 's3a', 's4b', 's1a', 's5b'];
+		const response = await user.json('/api/songs', 'POST', { ids });
+		assert.equal(response.status, 200);
+		const { songs } = await response.json();
+		assert.deepEqual(
+			songs.map((song) => song.id),
+			ids
+		);
+		assert.equal(subsonic.calls.get('/api/song'), 1, 'the queue was read in one call');
+		assert.equal(subsonic.calls.get('getSong'), 0, 'a track was looked up on its own');
+		// What the row and the queue need, from the names Navidrome uses.
+		assert.equal(songs[0].title, 'Song 3b');
+		assert.equal(songs[0].track, 2);
+		assert.equal(songs[0].coverArt, 'mf-s3b');
+		assert.equal(songs[0].year, 2003);
+		assert.equal(songs[0].quality.format, 'flac');
+	});
+
+	test('a restored queue keeps the cover of a track that has only the album art', async () => {
+		// `hasCoverArt` speaks for the file alone. A library whose covers are a
+		// `cover.jpg` beside the tracks answers false for every one of them, and
+		// the queue showed no cover at all where a fresh load showed the album's.
+		subsonic.state.folderArt.add('s1a');
+		subsonic.calls.reset();
+		try {
+			const ids = ['s1a', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+			const { songs } = await (await user.json('/api/songs', 'POST', { ids })).json();
+			assert.deepEqual(
+				songs.map((song) => song.id),
+				ids
+			);
+			const [albumCovered, ownArt] = songs;
+			assert.equal(albumCovered.albumId, 'al1');
+			assert.equal(albumCovered.coverArt, 'al-al1', 'the album cover, which Subsonic builds from the album id');
+			assert.equal(ownArt.coverArt, 'mf-s0a', 'a file with its own art keeps its own cover');
+		} finally {
+			subsonic.state.folderArt.delete('s1a');
+		}
+	});
+
+	test('a restored queue names a cover with its image hash, as Navidrome does, so new art is a new id', async () => {
+		// Navidrome's Subsonic answer sends `mf-<id>_<imageHash>`. Without the
+		// hash the same cover was cached under two ids, and the bare one never
+		// saw new art (#272).
+		const ids = ['s0a', 's1a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+		subsonic.state.imageHashes.set('s0a', '0123456789abcdef');
+		try {
+			const restore = async () => (await (await user.json('/api/songs', 'POST', { ids })).json()).songs[0];
+			const first = await restore();
+			assert.equal(first.coverArt, 'mf-s0a_0123456789abcdef');
+			subsonic.state.imageHashes.set('s0a', 'fedcba9876543210');
+			assert.equal((await restore()).coverArt, 'mf-s0a_fedcba9876543210', 'new art kept the old id');
+			// The music server still answers the id with its hash.
+			assert.equal((await user.request(`/api/cover/${first.coverArt}?size=64`)).status, 200);
+		} finally {
+			subsonic.state.imageHashes.delete('s0a');
+		}
+	});
+
+	test('a restored queue dates a remaster by the file, as the per-id path does', async () => {
+		// `originalYear` is the record's first release. Subsonic sends the
+		// file's own `year`, so a reissue must not come back dated by its first
+		// release in a restored queue and by the edition everywhere else.
+		subsonic.state.reissues.add('s1a');
+		try {
+			const ids = ['s1a', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+			const { songs } = await (await user.json('/api/songs', 'POST', { ids })).json();
+			assert.equal(songs[0].year, 2001, 'the edition, not the 1973 first release');
+		} finally {
+			subsonic.state.reissues.delete('s1a');
+		}
+	});
+
+	test('a queue longer than one batch is read in chunks and keeps its order', async () => {
+		const ids = Array.from({ length: 120 }, (_, i) => `s${i}a`);
+		subsonic.calls.reset();
+		const { songs } = await (await user.json('/api/songs', 'POST', { ids })).json();
+		assert.equal(songs.length, ids.length);
+		assert.deepEqual(
+			songs.map((song) => song.id),
+			ids
+		);
+		assert.equal(subsonic.calls.get('/api/song'), 2, '100 ids a call');
+	});
+
+	test('a queue still restores one track at a time when Navidrome limits its sign-in', async () => {
+		// A refused token asks for a new sign-in, and Navidrome limits those per
+		// address. Thrown out of the batch, it answered 502 and the page dropped
+		// the whole queue; the per-id calls need no session.
+		const nd = subsonic.state.navidrome;
+		const acceptFrom = nd.acceptFrom;
+		subsonic.state.loginLimited = true;
+		nd.acceptFrom = nd.issued + 1;
+		subsonic.calls.reset();
+		try {
+			const ids = ['s3b', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+			const response = await user.json('/api/songs', 'POST', { ids });
+			assert.equal(response.status, 200, 'the queue restores');
+			const { songs } = await response.json();
+			assert.deepEqual(
+				songs.map((song) => song.id),
+				ids
+			);
+			assert.equal(subsonic.calls.get('getSong'), ids.length, 'one call per track');
+		} finally {
+			subsonic.state.loginLimited = false;
+			nd.acceptFrom = acceptFrom;
+		}
+	});
+
+	test('a lookup after a sign-in the music server failed to answer gets a session again', async () => {
+		// The lookup above left no session behind: its sign-in was limited, and
+		// a sign-in that fails is not kept. A 503 from a Navidrome that is
+		// starting is not kept either: held, every later call for half an hour
+		// had no session and made no request.
+		const ids = ['s3b', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+		subsonic.state.loginFailing = true;
+		try {
+			const fallback = await user.json('/api/songs', 'POST', { ids });
+			assert.equal(fallback.status, 200, 'the queue falls back to the per-id calls');
+		} finally {
+			subsonic.state.loginFailing = false;
+		}
+		subsonic.calls.reset();
+		const again = await user.json('/api/songs', 'POST', { ids });
+		assert.equal(again.status, 200);
+		assert.equal(subsonic.calls.get('/api/song'), 1, 'the batch is asked for again');
+	});
+
+	test('a server that is not Navidrome is asked to sign in once, not before every call', async () => {
+		// An account of its own, so no token from the tests above is held for it.
+		subsonic.state.others.set('gonicuser', 'gonicpass');
+		const active = subsonic.state.navidrome;
+		subsonic.state.navidrome = null;
+		try {
+			const client = new Client(app.url);
+			assert.equal((await client.signIn({ username: 'gonicuser', password: 'gonicpass', backend: 'subsonic' })).status, 303);
+			subsonic.calls.reset();
+			const ids = ['s3b', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b'];
+			for (let i = 0; i < 3; i++) {
+				assert.equal((await client.json('/api/songs', 'POST', { ids })).status, 200);
+			}
+			// Each sign-in carries the password, so one per restored queue sent it
+			// three times here (#271).
+			assert.equal(subsonic.calls.get('/auth/login'), 1, `${subsonic.calls.get('/auth/login')} sign-ins for 3 lookups`);
+		} finally {
+			subsonic.state.navidrome = active;
+			subsonic.state.others.delete('gonicuser');
+		}
+	});
+
+	test('a server that is not Navidrome is read one track at a time', async () => {
+		const active = subsonic.state.navidrome;
+		subsonic.state.navidrome = null;
+		subsonic.calls.reset();
+		try {
+			const ids = ['s3b', 's0a', 's2b', 's4a', 's1b', 's5a', 's2a', 's0b', 's3a', 's4b', 's1a', 's5b'];
+			const { songs } = await (await user.json('/api/songs', 'POST', { ids })).json();
+			assert.deepEqual(
+				songs.map((song) => song.id),
+				ids
+			);
+			assert.equal(subsonic.calls.get('getSong'), ids.length, 'one call per track');
+		} finally {
+			subsonic.state.navidrome = active;
+		}
+	});
+
 	test('a ranged stream request is answered 206 with the range', async () => {
 		const response = await user.request('/api/stream/s1a?mode=raw', { headers: { range: 'bytes=0-99' } });
 		assert.equal(response.status, 206);
@@ -2792,6 +2971,19 @@ describe('covers', () => {
 		assert.ok(cached, 'the cover was never served from the cache');
 		assert.ok(streamed.length > 0);
 		assert.deepEqual(cached, streamed);
+	});
+
+	test('a cover a browser says came from another site is served but not stored', async () => {
+		subsonic.calls.reset();
+		const cross = await user.request('/api/cover/al-9?size=192', { headers: { 'sec-fetch-site': 'cross-site' } });
+		assert.equal(cross.status, 200, 'the cover is not refused');
+		await cross.arrayBuffer();
+		// The write to disk happens after the response.
+		await new Promise((done) => setTimeout(done, 300));
+		const before = subsonic.calls.get('getCoverArt');
+		const again = await user.request('/api/cover/al-9?size=192');
+		await again.arrayBuffer();
+		assert.equal(subsonic.calls.get('getCoverArt'), before + 1, 'the cross-site cover was stored');
 	});
 
 	test('a cover the music server calls HTML is not served as HTML', async () => {
@@ -3413,6 +3605,67 @@ describe('sessions ending', () => {
 		}
 	});
 
+	test('every JSON handler ends the account’s sessions when the credential is refused', async () => {
+		// The same rule as the page above, for the handlers that answer JSON and do
+		// their own error mapping. Each is driven with what it accepts, so the
+		// upstream is really asked.
+		const calls = [
+			['/api/songs', 'POST', { ids: ['s1a', 's2a'] }],
+			['/api/lyrics/s1a', 'GET', undefined],
+			['/api/playback', 'POST', { songId: 's1a', event: 'start', position: 0, completed: false }],
+			['/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' }],
+			['/api/star', 'POST', { id: 's1a', kind: 'song', starred: true }],
+			['/api/playlists', 'GET', undefined],
+			['/api/playlists', 'POST', { name: 'Refused' }],
+			['/api/playlists/pl1', 'PATCH', { name: 'Refused' }],
+			['/api/playlists/pl1', 'DELETE', undefined],
+			['/api/playlists/pl1/tracks', 'POST', { songIds: ['s1a'] }],
+			['/api/playlists/pl1/tracks', 'DELETE', { indices: [0] }],
+			['/api/playlists/pl1/export', 'GET', undefined],
+			['/api/download/s1a', 'GET', undefined],
+			// These four mapped the refusal by hand before the helper answered it.
+			['/api/playlists/smart', 'POST', { name: 'Refused', rules: { match: 'all', rules: [{ field: 'playcount', op: 'gt', value: 3 }], sort: 'lastplayed', order: 'desc', limit: 50 } }],
+			['/api/playlists/match', 'POST', { tracks: [{ title: 'Song', artist: 'Artist' }] }],
+			['/api/shares', 'POST', { kind: 'song', id: 's1a', days: 1 }]
+		];
+		// Play reports are only sent when the account asks for them, so it is on
+		// for this test whatever the ones before it left.
+		const setting = async (reportPlayback) => {
+			const client = new Client(app.url);
+			await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' });
+			return client.json('/api/settings', 'PATCH', { reportPlayback });
+		};
+		assert.equal((await setting(true)).status, 200);
+		try {
+			for (const [path, method, data] of calls) {
+				const client = new Client(app.url);
+				await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' });
+				subsonic.state.password = 'changed-upstream';
+				// Navidrome keeps a session token past a password change, so the
+				// smart playlist call would go through on one held from earlier.
+				subsonic.state.navidrome.acceptFrom = subsonic.state.navidrome.issued + 1;
+				try {
+					const answer = data === undefined ? await client.request(path, { method }) : await client.json(path, method, data);
+					// The answer itself says so, or the player reads the refusal as the
+					// music server failing and keeps going (#270).
+					assert.equal(answer.status, 401, `${method} ${path} answered ${answer.status} for a refused credential`);
+					// Settings is answered from this database, so it says whether the
+					// session is still there without asking the music server. A handler
+					// that left it alive answers 200 here.
+					const after = await client.request('/api/settings');
+					assert.equal(after.status, 401, `${method} ${path} left the session alive`);
+				} finally {
+					subsonic.state.password = 'testpass';
+				}
+			}
+		} finally {
+			assert.equal((await setting(false)).status, 200);
+			// Every session for the account was ended here, this suite's own client
+			// included: it signs in again so the tests after this one have one.
+			await user.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' });
+		}
+	});
+
 	test('signing out ends the session', async () => {
 		const client = new Client(app.url);
 		await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' });
@@ -3475,7 +3728,7 @@ describe('signed in on', () => {
 		// A browser signs out only sessions older than its own: the iPhone, signed
 		// in second, is offered the phone, and the phone is told to use the iPhone.
 		assert.ok((await handles(iphone)).length >= 1);
-		assert.match(html, /Signed in after this browser\.\s*<span class="later-how[^"]*">Sign it out there, or sign in again here\.</);
+		assert.match(html, /Signed in after this browser\.<\/span>/);
 		assert.ok(!html.includes('Mozilla/5.0'), 'the whole user agent reached the page');
 		await iphone.request('/logout', { method: 'POST' });
 		await phone.request('/logout', { method: 'POST' });
@@ -3573,6 +3826,271 @@ describe('signed in on', () => {
  * read here by the format, not by this tree's own writer: the directory at
  * the end, then each file's header, then its bytes inflated.
  */
+/**
+ * The derivation this build used before the key salt existed, written out here
+ * because the tests have to hold exactly what an install from that build holds:
+ * a constant salt per purpose, and nothing in the data directory.
+ */
+const E2E_SECRET = 'e2e-secret-0123456789abcdef0123456789';
+const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 96 * 1024 * 1024 };
+const saltOf = (text) => createHash('sha256').update(text).digest();
+
+const constantKey = (purpose) => scryptSync(E2E_SECRET, saltOf(`heddohon:v1:${purpose}`), 32, SCRYPT);
+
+const installKey = (hex, purpose) =>
+	scryptSync(E2E_SECRET, createHash('sha256').update(Buffer.from(hex, 'hex')).update(`:v1:${purpose}`).digest(), 32, SCRYPT);
+
+const sealWith = (key, text) => {
+	const iv = randomBytes(12);
+	const cipher = createCipheriv('aes-256-gcm', key, iv);
+	const body = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+	return `v1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${body.toString('base64url')}`;
+};
+
+const openWith = (key, blob) => {
+	const [, iv, tag, body] = blob.split('.');
+	const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
+	decipher.setAuthTag(Buffer.from(tag, 'base64url'));
+	return Buffer.concat([decipher.update(Buffer.from(body, 'base64url')), decipher.final()]).toString('utf8');
+};
+
+const digestWith = (key, token) => createHmac('sha256', key).update(token).digest('base64url');
+
+/** Which salt a stopped install's SQLite database says it was sealed with. */
+const saltRow = async (dir) => {
+	const { default: Database } = await import('better-sqlite3');
+	const database = new Database(join(dir, 'heddohon.db'), { readonly: true });
+	try {
+		return database.prepare("SELECT value FROM meta WHERE key = 'key_salt'").get()?.value ?? null;
+	} finally {
+		database.close();
+	}
+};
+
+describe('the key salt', () => {
+	test('a fresh data directory gets its own, and a restart keeps it', async () => {
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url });
+		const client = new Client(app.url);
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const file = join(app.dataDir, 'crypto-salt');
+			const salt = readFileSync(file, 'utf8').trim();
+			assert.match(salt, /^[0-9a-f]{64}$/, 'the salt is not 32 bytes written as hex');
+			assert.equal(statSync(file).mode & 0o777, 0o600, 'the salt is readable by more than this user');
+
+			await app.stop({ keepData: true });
+			const again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: app.dataDir });
+			// Same port is not promised, so the client moves with its cookies.
+			client.base = again.url;
+			try {
+				assert.equal(readFileSync(join(again.dataDir, 'crypto-salt'), 'utf8').trim(), salt, 'the restart made a new salt');
+				assert.equal((await client.request('/api/settings')).status, 200, 'the stored session no longer opens');
+				// The sealed credential opens as well, which a changed salt stops.
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the stored credential no longer opens'
+				);
+			} finally {
+				await again.stop();
+			}
+		} finally {
+			await app.stop();
+		}
+	});
+
+	test('an install from before the salt keeps working, on the constant one', async () => {
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url });
+		const client = new Client(app.url);
+		let kept = null;
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const salt = readFileSync(join(app.dataDir, 'crypto-salt'), 'utf8').trim();
+			const token = client.cookies.get('heddohon_session');
+			assert.ok(token, 'the sign-in left no session cookie');
+			await app.stop({ keepData: true });
+			kept = app.dataDir;
+
+			// What that build held: the credential sealed with the constant salt,
+			// the session digested with it, and no salt file at all.
+			const { default: Database } = await import('better-sqlite3');
+			const database = new Database(join(kept, 'heddohon.db'));
+			try {
+				const accounts = database.prepare('SELECT id, credential FROM accounts').all();
+				assert.ok(accounts.length > 0, 'the sign-in left no account');
+				for (const account of accounts) {
+					const plain = openWith(installKey(salt, 'credential'), account.credential);
+					database
+						.prepare('UPDATE accounts SET credential = ? WHERE id = ?')
+						.run(sealWith(constantKey('credential'), plain), account.id);
+				}
+				const stored = digestWith(installKey(salt, 'session'), token);
+				const legacy = digestWith(constantKey('session'), token);
+				assert.equal(database.prepare('UPDATE sessions SET token_digest = ? WHERE token_digest = ?').run(legacy, stored).changes, 1);
+				// That build kept no record of the salt either.
+				assert.equal(database.prepare("DELETE FROM meta WHERE key = 'key_salt'").run().changes, 1);
+			} finally {
+				database.close();
+			}
+			rmSync(join(kept, 'crypto-salt'));
+
+			const again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 200, 'the stored session no longer opens');
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the credential sealed by the earlier build no longer opens'
+				);
+				assert.equal(existsSync(join(kept, 'crypto-salt')), false, 'a salt was made for an install that predates it');
+			} finally {
+				await again.stop({ keepData: true });
+			}
+			assert.equal((await saltRow(kept)), 'constant', 'the constant salt was not recorded in the database');
+		} finally {
+			await app.stop();
+			if (kept) rmSync(kept, { recursive: true, force: true });
+		}
+	});
+
+	test('a salted install that has lost its salt is refused, and is not moved to the constant one', async () => {
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url });
+		const client = new Client(app.url);
+		let kept = null;
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const salt = readFileSync(join(app.dataDir, 'crypto-salt'), 'utf8');
+			await app.stop({ keepData: true });
+			kept = app.dataDir;
+			const recorded = (await saltRow(kept));
+			assert.match(recorded, /^own:[0-9a-f]{64}$/, 'the database does not say which salt sealed it');
+
+			// A restore of heddohon.db that left the salt behind.
+			rmSync(join(kept, 'crypto-salt'));
+			let again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept, healthy: false });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 500);
+				// Signing in again would seal the credential with a salt the database
+				// was not sealed with.
+				assert.equal((await new Client(again.url).signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 500);
+				assert.equal((await (await fetch(`${again.url}/healthz`)).json()).status, 'misconfigured');
+				assert.equal(existsSync(join(kept, 'crypto-salt')), false, 'a new salt was made in place of the lost one');
+				assert.match(again.output(), /crypto-salt is missing/);
+			} finally {
+				await again.stop({ keepData: true });
+			}
+			assert.equal((await saltRow(kept)), recorded, 'the record of the salt was changed');
+
+			// Another install's salt in its place is refused as well.
+			writeFileSync(join(kept, 'crypto-salt'), `${randomBytes(32).toString('hex')}\n`, { mode: 0o600 });
+			again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept, healthy: false });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 500);
+			} finally {
+				await again.stop({ keepData: true });
+			}
+
+			// The right one put back, everything opens as it did.
+			writeFileSync(join(kept, 'crypto-salt'), salt, { mode: 0o600 });
+			again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: kept });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 200, 'the restored salt does not open the session');
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the restored salt does not open the credential'
+				);
+			} finally {
+				await again.stop();
+			}
+		} finally {
+			await app.stop();
+			if (kept) rmSync(kept, { recursive: true, force: true });
+		}
+	});
+
+	/*
+	 * PostgreSQL holds the accounts, and the data directory holds neither them
+	 * nor setup.json. Run with HH_E2E_POSTGRES_URL pointing at an empty
+	 * database the test may use; skipped without it.
+	 */
+	test('a PostgreSQL install from before the salt keeps the constant one', { skip: !process.env.HH_E2E_POSTGRES_URL }, async () => {
+		const pgEnv = { HEDDOHON_DATABASE_URL: process.env.HH_E2E_POSTGRES_URL };
+		const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, env: pgEnv });
+		const client = new Client(app.url);
+		let kept = null;
+		const { default: pg } = await import('pg');
+		const pool = new pg.Pool({ connectionString: process.env.HH_E2E_POSTGRES_URL, options: '-c search_path=heddohon' });
+		try {
+			assert.equal((await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
+			const salt = readFileSync(join(app.dataDir, 'crypto-salt'), 'utf8').trim();
+			const token = client.cookies.get('heddohon_session');
+			await app.stop({ keepData: true });
+			kept = app.dataDir;
+
+			// What that build held, as in the SQLite test above, with no record of
+			// the salt and nothing of it in the data directory.
+			for (const account of (await pool.query('SELECT id, credential FROM accounts')).rows) {
+				const plain = openWith(installKey(salt, 'credential'), account.credential);
+				await pool.query('UPDATE accounts SET credential = $1 WHERE id = $2', [sealWith(constantKey('credential'), plain), account.id]);
+			}
+			const moved = await pool.query('UPDATE sessions SET token_digest = $1 WHERE token_digest = $2', [
+				digestWith(constantKey('session'), token),
+				digestWith(installKey(salt, 'session'), token)
+			]);
+			assert.equal(moved.rowCount, 1);
+			await pool.query("DELETE FROM meta WHERE key = 'key_salt'");
+			rmSync(join(kept, 'crypto-salt'));
+
+			const again = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, env: pgEnv, dataDir: kept });
+			client.base = again.url;
+			try {
+				assert.equal((await client.request('/api/settings')).status, 200, 'the stored session no longer opens');
+				assert.equal(
+					(await client.json('/api/tracks', 'POST', { source: 'artist', id: 'ar1', part: 'first' })).status,
+					200,
+					'the credential sealed by the earlier build no longer opens'
+				);
+				assert.equal(existsSync(join(kept, 'crypto-salt')), false, 'a salt was made for an install that predates it');
+			} finally {
+				await again.stop();
+			}
+			const row = await pool.query("SELECT value FROM meta WHERE key = 'key_salt'");
+			assert.equal(row.rows[0]?.value, 'constant');
+		} finally {
+			await app.stop();
+			if (kept) rmSync(kept, { recursive: true, force: true });
+			await pool.query('DROP SCHEMA IF EXISTS heddohon CASCADE').catch(() => {});
+			await pool.end();
+		}
+	});
+
+	test('a salt that cannot be read is not replaced by a new one', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'heddohon-e2e-salt-'));
+		try {
+			writeFileSync(join(dir, 'crypto-salt'), 'not a salt\n');
+			const app = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir: dir, healthy: false });
+			try {
+				// A presented session is digested before anything is read, so this is
+				// the first derivation, and it has to fail rather than pick a new salt.
+				const response = await new Client(app.url).request('/api/settings', {
+					headers: { cookie: 'heddohon_session=nonsense' }
+				});
+				assert.equal(response.status, 500);
+				assert.equal(readFileSync(join(dir, 'crypto-salt'), 'utf8'), 'not a salt\n', 'the bad salt was overwritten');
+			} finally {
+				await app.stop();
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe('a backup of the database', () => {
 	// The session tests above end every older session of the account, the shared
 	// client's among them.
@@ -3644,7 +4162,7 @@ describe('a backup of the database', () => {
 				response.headers.get('content-disposition') ?? '',
 				/^attachment; filename="heddohon-backup-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\dZ\.zip"$/
 			);
-			assert.deepEqual([...files.keys()], ['heddohon.db', 'backup.json', 'README.txt']);
+			assert.deepEqual([...files.keys()], ['heddohon.db', 'crypto-salt', 'backup.json', 'README.txt']);
 
 			const dir = mkdtempSync(join(tmpdir(), 'heddohon-e2e-backup-'));
 			writeFileSync(join(dir, 'heddohon.db'), files.get('heddohon.db'));
@@ -3707,6 +4225,9 @@ describe('a backup of the database', () => {
 			const { files } = await backup();
 			const dataDir = mkdtempSync(join(tmpdir(), 'heddohon-e2e-restore-'));
 			writeFileSync(join(dataDir, 'heddohon.db'), files.get('heddohon.db'));
+			// Both, as the archive's README says: without the salt the restored
+			// server refuses to start (the key salt tests above).
+			writeFileSync(join(dataDir, 'crypto-salt'), files.get('crypto-salt'), { mode: 0o600 });
 			restored = await startApp({ subsonicUrl: subsonic.url, jellyfinUrl: jellyfin.url, dataDir });
 
 			// The session that made the backup is not in it.
@@ -3879,7 +4400,7 @@ describe('the security review of 2026-09-28', () => {
 				assert.equal((await last.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' })).status, 303);
 			}
 			const { html } = await last.page('/settings');
-			const count = Number(/Signed in on<\/h3>\s*<span[^>]*>(\d+)</.exec(html)?.[1]);
+			const count = html.match(/<li class="session[\s"]/g)?.length;
 			assert.equal(count, 50, separate.output());
 		} finally {
 			await separate.stop();
@@ -4240,7 +4761,7 @@ describe('new releases', () => {
 	 * What the home page's data says of the shelf: its releases' groups, in
 	 * order. Streamed, so drawn in the browser and not in the server's HTML.
 	 */
-	const shelf = async (client) => [...(await (await client.request('/__data.json')).text()).matchAll(/release-group\/(rg-[\w-]+)/g)].map((m) => m[1]);
+	const shelf = async (client) => [...(await (await client.request('/__data.json')).text()).matchAll(/release-group\/([\w-]+)/g)].map((m) => m[1]);
 
 	test('is off unless the server allows it, and then until an account turns it on', async () => {
 		assert.doesNotMatch((await user.page('/settings?tab=history')).html, /New releases on the home page/);
@@ -4267,8 +4788,10 @@ describe('new releases', () => {
 		const found = await shelf(listener);
 		assert.ok(Date.now() - started < 2000, `the first visit took ${Date.now() - started}ms`);
 		// The announced EP first, then the album out 20 days ago; not the one the
-		// library has, the live one, the old one or the single.
-		assert.deepEqual(found, ['rg-3-soon', 'rg-0-new']);
+		// library has, the live one, the old one or the single. And not the group
+		// MusicBrainz gave without an id: its id goes into the shelf's link.
+		assert.deepEqual(found, ['33333333-3333-4333-8333-000000000001', 'a10c0000-0000-4000-8000-000000000001']);
+		assert.ok(!found.includes('rg-not-an-id'), 'a release group with no MusicBrainz id was listed');
 
 		// Artist 0000's id came from the music server; only Artist 0003 was searched for.
 		const searches = musicbrainz.requests.filter((request) => request.path === '/ws/2/artist');
@@ -4278,7 +4801,7 @@ describe('new releases', () => {
 		assert.ok(gaps.every((gap) => gap >= 1000), `requests ${gaps.join(', ')}ms apart`);
 
 		const asked = musicbrainz.requests.length;
-		assert.deepEqual(await shelf(listener), ['rg-3-soon', 'rg-0-new']);
+		assert.deepEqual(await shelf(listener), ['33333333-3333-4333-8333-000000000001', 'a10c0000-0000-4000-8000-000000000001']);
 		assert.equal(musicbrainz.requests.length, asked, 'the shelf was not held');
 	});
 
@@ -4304,7 +4827,7 @@ describe('new releases', () => {
 		const listener = new Client(on.url);
 		await listener.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' });
 		const started = Date.now();
-		assert.deepEqual(await shelf(listener), ['rg-3-soon', 'rg-0-new']);
+		assert.deepEqual(await shelf(listener), ['33333333-3333-4333-8333-000000000001', 'a10c0000-0000-4000-8000-000000000001']);
 		assert.ok(Date.now() - started < 2000, `the visit after a restart took ${Date.now() - started}ms`);
 		// What MusicBrainz said is kept too: the new shelf asked it nothing.
 		for (let wait = 0; wait < 40 && JSON.parse(readFileSync(file, 'utf8')).shelves[0][1] === twoDaysAgo; wait++) {
@@ -4436,7 +4959,7 @@ describe('a now-playing link', () => {
 			assert.equal(made.type, 'success', explain('the link was not made'));
 			const token = made.nowPlayingToken;
 			assert.match(token, /^hhnp_[\w-]{43}$/);
-			assert.match((await client.page('/settings?tab=account')).html, /You have a link, made/);
+			assert.match((await client.page('/settings?tab=account')).html, /Link made /);
 
 			// Nobody signed in.
 			const visitor = new Client(app.url);
@@ -4779,6 +5302,28 @@ describe('an artist\'s releases by kind', () => {
 		}
 		});
 	});
+
+	test('an album\'s rows carry only what differs from the album', async () => {
+		// An account of its own: an album read in the last minute is held per account.
+		const rows = async (id) => {
+			let drawn;
+			await asFreshAccount(`rows-${id}-${subsonic.state.albumShapes.size}-${subsonic.state.lossy.size}`, async (client) => {
+				const { html } = await client.page(`/albums/${id}`);
+				drawn = { artist: /class="sub[ "]/.test(html), quality: /class="quality[ "]/.test(html) };
+			});
+			return drawn;
+		};
+		try {
+			assert.deepEqual(await rows('al1'), { artist: false, quality: false }, 'one artist, one format');
+			subsonic.state.albumShapes.set('al2', { artist: 'Various Artists' });
+			assert.deepEqual(await rows('al2'), { artist: true, quality: false }, 'a compilation names each artist');
+			subsonic.state.lossy.add(3);
+			assert.deepEqual(await rows('al3'), { artist: false, quality: true }, 'mixed formats are shown per track');
+		} finally {
+			subsonic.state.albumShapes.clear();
+			subsonic.state.lossy.clear();
+		}
+	});
 });
 
 describe('the folder view', () => {
@@ -4889,13 +5434,13 @@ describe('plays sent to a Discord channel and to ListenBrainz', () => {
 		try {
 			assert.match(await section(client), /ListenBrainz user token/);
 			assert.equal((await action(client, 'linkIntegration', { kind: 'listenbrainz', value: OUTSIDE.listenBrainzToken })).status, 200);
-			assert.match(await section(client), /Scrobbling to listener, and showing/);
+			assert.match(await section(client), /hint[^>]*>listener</);
 		} finally {
 			subsonic.state.navidrome.enabled.listenbrainz = true;
 		}
 		// Linked here from before: the row stays, to unlink it, and Navidrome is
 		// not given a token while this server holds one.
-		assert.match(await section(client), /Scrobbling to listener from this server\..*unlink it here to link it there/s);
+		assert.match(await section(client), /hint[^>]*>listener<[\s\S]*Unlink/);
 		const other = await client.request('/settings?/linkListenBrainz', {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json', 'x-sveltekit-action': 'true' },
@@ -4907,7 +5452,7 @@ describe('plays sent to a Discord channel and to ListenBrainz', () => {
 
 		assert.equal((await action(client, 'linkIntegration', { kind: 'discord', value: address })).status, 200);
 		const linked = await section(client);
-		assert.match(linked, /through the webhook “Now playing”/);
+		assert.match(linked, /hint[^>]*>Now playing</);
 		assert.ok(!(await client.page('/settings?tab=account')).html.includes('w'.repeat(20)), 'the webhook token reached the page');
 
 		// A title written to be a link, and a mention: shown as text, pinging nobody.
@@ -4957,11 +5502,11 @@ describe('plays sent to a Discord channel and to ListenBrainz', () => {
 		try {
 			await play(client, 's4a');
 			let html = await section(client);
-			for (let attempt = 0; attempt < 50 && /through the webhook/.test(html); attempt++) {
+			for (let attempt = 0; attempt < 50 && /hint[^>]*>Now playing</.test(html); attempt++) {
 				await new Promise((done) => setTimeout(done, 20));
 				html = await section(client);
 			}
-			assert.doesNotMatch(html, /through the webhook/);
+			assert.doesNotMatch(html, /hint[^>]*>Now playing</);
 		} finally {
 			outside.state.webhookGone = false;
 			outside.posts.length = 0;
@@ -4976,7 +5521,7 @@ describe('plays sent to a Discord channel and to ListenBrainz', () => {
 			assert.equal((await action(client, 'linkIntegration', { kind: 'discord', value: `https://discord.com${OUTSIDE.webhook}` })).status, 200);
 			subsonic.state.password = 'another-password';
 			const next = await signedIn(on.url, 'outlet', 'another-password', 'subsonic');
-			assert.doesNotMatch(await section(next), /through the webhook/);
+			assert.doesNotMatch(await section(next), /hint[^>]*>Now playing</);
 			await play(next, 's3a');
 			await new Promise((done) => setTimeout(done, 200));
 			assert.equal(outside.posts.length, 0, 'a play went to the channel of whoever held the name before');
@@ -4994,7 +5539,7 @@ describe('plays sent to a Discord channel and to ListenBrainz', () => {
 		});
 		assert.equal((await action(client, 'linkIntegration', { kind: 'listenbrainz', value: OUTSIDE.listenBrainzToken })).status, 200);
 		const html = (await client.page('/settings?tab=account')).html;
-		assert.match(html, /Scrobbling to listener/);
+		assert.match(html, /hint[^>]*>listener</);
 		assert.ok(!html.includes(OUTSIDE.listenBrainzToken), 'the token reached the page');
 
 		await client.json('/api/playback', 'POST', { songId: 't1', event: 'start', position: 0 });
@@ -5386,7 +5931,7 @@ describe('plays from other apps, through the Navidrome plugin', () => {
 			for (const id of ['s3a', 's4b', 's5a']) subsonic.state.played.set(id, new Date().toISOString());
 			try {
 				await plugin({ type: 'poll' });
-				assert.match((await client.page('/settings?tab=history')).html, /Navidrome keeps every play in its scrobble history/);
+				assert.doesNotMatch((await client.page('/settings?tab=history')).html, /has not been heard from/);
 				const asked = action(client, 'importHistory');
 				assert.deepEqual(await untilWanted('collector'), { username: 'collector', from: 0 });
 
@@ -5462,7 +6007,6 @@ describe('plays from other apps, through the Navidrome plugin', () => {
 			await client.signIn({ username: 'testuser', password: 'testpass', backend: 'subsonic' });
 			const settings = (await client.page('/settings?tab=history')).html;
 			assert.match(settings, /has not been heard from in the last minute/);
-			assert.match(settings, /keeps the date each track was last\s+played/);
 			const result = await action(client, 'importHistory');
 			assert.deepEqual(result.data, { historyImported: { found: 1, imported: 1 } });
 		} finally {
@@ -6051,7 +6595,12 @@ describe('smart playlists', () => {
 	/** A smart playlist put on the mock as Navidrome or an `.nsp` file left it. */
 	const held = (id, entry) => subsonic.state.smart.set(id, { name: id, owner: null, public: false, path: '', ...entry });
 	/** A page's words, without the marks Svelte leaves between the parts of a block. */
-	const words = async (client, path) => (await client.page(path)).html.replace(/<!--.*?-->/g, '');
+	const words = async (client, path) => {
+		let html = (await client.page(path)).html;
+		// Again until nothing changes, so a mark that removing another one joins up goes too.
+		for (let before = ''; before !== html; ) [before, html] = [html, html.replace(/<!--[\s\S]*?-->/g, '')];
+		return html;
+	};
 
 	test('a new one is checked here and sent in Navidrome\'s format', async () => {
 		const refused = [
@@ -6289,7 +6838,6 @@ describe('daily mixes', () => {
 
 				const page = (await client.page('/mixes/1')).html;
 				assert.match(page, /Daily mix 1/);
-				assert.match(page, /Made today from Artist 0005/);
 
 				// The next day, they are made again.
 				const { default: Database } = await import('better-sqlite3');

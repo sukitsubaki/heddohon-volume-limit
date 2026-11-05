@@ -20,14 +20,6 @@
 
 	let { data }: { data: PageData } = $props();
 
-	const greeting = $derived.by(() => {
-		const hour = new Date().getHours();
-		if (hour < 5) return 'Still up';
-		if (hour < 12) return 'Good morning';
-		if (hour < 18) return 'Good afternoon';
-		return 'Good evening';
-	});
-
 	// The newest release is promoted out of the shelf and given the lead.
 	const featured = $derived(data.recentlyAdded[0] ?? null);
 	const restOfRecent = $derived(data.recentlyAdded.slice(1));
@@ -68,40 +60,7 @@
 	const rediscovering = $derived(data.rediscover.length > 0);
 	const remembering = $derived((onThisDay?.albums.length ?? 0) > 0);
 
-	/*
-	 * Whether the daily mixes have arrived with any, for the numbers of the
-	 * sections after them. Streamed, so Favourites and Something different can
-	 * be drawn first and take the next number when the mixes arrive.
-	 */
-	let mixing = $state(false);
-	$effect(() => {
-		let current = true;
-		mixing = false;
-		data.mixes.then((mixes) => {
-			if (current) mixing = mixes.length > 0;
-		});
-		return () => {
-			current = false;
-		};
-	});
-
-	// The same for the new releases, which follow the mixes.
-	let releasing = $state(false);
-	$effect(() => {
-		let current = true;
-		releasing = false;
-		data.newReleases.then((releases) => {
-			if (current) releasing = releases.length > 0;
-		});
-		return () => {
-			current = false;
-		};
-	});
-
 	// The numbered album shelves, ahead of the daily mixes.
-	const albumShelves = $derived(shelves.length + Number(rediscovering) + Number(remembering));
-	// Every numbered section above Favourites.
-	const aboveFavourites = $derived(albumShelves + Number(mixing) + Number(releasing));
 </script>
 
 <svelte:head>
@@ -117,10 +76,7 @@
 					<Avatar name={data.me.name} src={avatarUrl(data.me.handle, data.me.avatar)} size={3.25} />
 				</a>
 			{/if}
-			<div>
-				<span class="hh-eyebrow">{greeting}</span>
-				<h1>Your library</h1>
-			</div>
+			<h1>Your library</h1>
 		</div>
 		{#if data.discover.length > 0}
 			<button class="hh-button shuffle" onclick={() => player.playShuffled(data.discover)}>
@@ -163,8 +119,8 @@
 		</div>
 	{/if}
 
-	{#each shelves as shelf, index (shelf.title)}
-		<MediaShelf title={shelf.title} href={shelf.href} index={index + 1}>
+	{#each shelves as shelf (shelf.title)}
+		<MediaShelf title={shelf.title} href={shelf.href}>
 			{#each shelf.albums as album (album.id)}
 				<MediaCard
 					href="/albums/{album.id}"
@@ -181,20 +137,19 @@
 
 	<!-- From the history on this server; see forgottenAlbums and onThisDay. -->
 	{#if rediscovering}
-		<RediscoverShelf albums={data.rediscover} index={shelves.length + 1} />
+		<RediscoverShelf albums={data.rediscover} />
 	{/if}
 
 	{#if onThisDay && remembering}
-		<OnThisDayShelf albums={onThisDay.albums} today={onThisDay.today} index={shelves.length + Number(rediscovering) + 1} />
+		<OnThisDayShelf albums={onThisDay.albums} today={onThisDay.today} />
 	{/if}
 
 	<!--
-		Streamed, and numbered after the album shelves; the sections below it
-		take the next numbers when it arrives. See mixes.ts.
+		Streamed; see mixes.ts.
 	-->
 	{#await data.mixes then mixes}
 		{#if mixes.length > 0}
-			<MediaShelf title="Made for you" eyebrow="Daily mixes, new each day" index={albumShelves + 1}>
+			<MediaShelf title="Made for you">
 				{#each mixes as mix (mix.n)}
 					<MediaCard
 						href="/mixes/{mix.n}"
@@ -211,7 +166,7 @@
 	<!-- Streamed, after the mixes; see newreleases.ts. -->
 	{#await data.newReleases then releases}
 		{#if releases.length > 0}
-			<NewReleasesShelf {releases} index={albumShelves + Number(mixing) + 1} />
+			<NewReleasesShelf {releases} />
 		{/if}
 	{/await}
 
@@ -219,18 +174,14 @@
 	{#await data.favouriteSongs then favouriteSongs}
 		{#if favouriteSongs.length > 0}
 			<section>
-				<SectionHeader title="Favourites" href="/favourites" index={aboveFavourites + 1} />
+				<SectionHeader title="Favourites" href="/favourites" />
 				<TrackList songs={favouriteSongs} variant="artwork" showAlbum showQuality={false} columns />
 			</section>
 		{/if}
 
 		{#if data.discover.length > 0}
 			<section>
-				<SectionHeader
-					title="Something different"
-					eyebrow="Picked at random"
-					index={aboveFavourites + (favouriteSongs.length > 0 ? 2 : 1)}
-				/>
+				<SectionHeader title="Something different" />
 				<TrackList songs={data.discover} variant="artwork" showAlbum showQuality={false} columns />
 			</section>
 		{/if}
@@ -238,10 +189,6 @@
 		{#if !featured && favouriteSongs.length === 0}
 			<div class="empty">
 				<h2>Nothing to show yet</h2>
-				<p class="hh-muted">
-					Heddohon could not read any albums from your music server. Check that the library has
-					finished scanning, then reload.
-				</p>
 			</div>
 		{/if}
 	{/await}
@@ -283,11 +230,6 @@
 	.me {
 		flex: none;
 		border-radius: 50%;
-		transition: transform var(--dur-press) var(--ease-out);
-	}
-
-	.me:hover {
-		transform: scale(1.05);
 	}
 
 	.me:focus-visible {
@@ -391,8 +333,4 @@
 		border-radius: var(--r-lg);
 	}
 
-	.empty p {
-		max-width: 32rem;
-		margin: 0;
-	}
 </style>

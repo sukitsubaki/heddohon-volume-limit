@@ -164,7 +164,7 @@
 	--glow-icon: none;
 	--ambience-strength: 0%;
 
-	--display-weight: 700;
+	--display-weight: 600;
 	--display-tracking: -0.02em;
 
 	/* One radius for panes, cards and covers, and a smaller one for what sits
@@ -404,6 +404,21 @@
 	content: ']' / '';
 }
 
+/*
+ * The brackets sit against what they hold, `[shuffle]` as a terminal's own
+ * dialogs write it. The button's 0.4rem gap put a space inside each bracket,
+ * on top of the space the face leaves inside `[` and `]` in their cells. An
+ * icon after `[` keeps the padding of its own box. `FavouriteButton` draws its
+ * own brackets and does the same.
+ */
+[data-theme='terminal'] .hh-button::before {
+	margin-right: -0.35rem;
+}
+
+[data-theme='terminal'] .hh-button::after {
+	margin-left: -0.35rem;
+}
+
 [data-theme='terminal'] .hh-button:hover,
 [data-theme='terminal'] .hh-button:focus-visible {
 	color: var(--accent);
@@ -434,7 +449,7 @@
 	padding: 0.5rem 1rem;
 	background: var(--accent);
 	color: var(--accent-contrast);
-	font-weight: 700;
+	font-weight: 600;
 }
 
 [data-theme='terminal'] .hh-button--primary::before,
@@ -450,10 +465,8 @@
 }
 
 [data-theme='terminal'] .hh-eyebrow {
-	letter-spacing: 0;
+	font-family: var(--font-mono);
 	text-transform: lowercase;
-	font-size: 0.75rem;
-	color: var(--text-muted);
 }
 
 /* ── Motion ──────────────────────────────────────────────────────────────── */

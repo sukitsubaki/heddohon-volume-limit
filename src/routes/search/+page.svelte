@@ -72,12 +72,11 @@
 	</div>
 
 	{#if !data.searched}
-		<p class="hint hh-muted">Type at least two characters to search your library.</p>
 		<!-- Somewhere to go before anything is typed. Streamed; see the loader. -->
 		{#await data.genres then genres}
 			{#if genres.length > 0}
 				<section>
-					<SectionHeader title="Browse by genre" href="/genres" index={1} />
+					<SectionHeader title="Browse by genre" href="/genres" />
 					<div class="genres hh-stagger">
 						{#each genres as genre (genre.id)}
 							<a class="genre hh-glass" href="/genres/{encodeURIComponent(genre.id)}">
@@ -96,7 +95,7 @@
 	{:else}
 		{#if artists.length > 0}
 			<section>
-				<SectionHeader title="Artists" index={1} />
+				<SectionHeader title="Artists" />
 				<MediaGrid density="compact">
 					{#each artists as artist (artist.id)}
 						<MediaCard
@@ -113,7 +112,7 @@
 
 		{#if albums.length > 0}
 			<section>
-				<SectionHeader title="Albums" index={2} />
+				<SectionHeader title="Albums" />
 				<MediaGrid density={data.settings.gridSize}>
 					{#each albums as album (album.id)}
 						<MediaCard
@@ -132,7 +131,7 @@
 
 		{#if songs.length > 0}
 			<section>
-				<SectionHeader title="Tracks" index={3} />
+				<SectionHeader title="Tracks" />
 				<TrackList {songs} variant="artwork" showAlbum />
 			</section>
 		{/if}
@@ -237,8 +236,7 @@
 	.genre-name {
 		font-family: var(--font-display);
 		font-size: 1.125rem;
-		font-weight: 750;
-		letter-spacing: -0.015em;
+		font-weight: 600;
 		line-height: 1.15;
 		color: var(--text-strong);
 		text-shadow: var(--text-shade);

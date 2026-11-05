@@ -16,7 +16,8 @@
 		coverBase,
 		avatarSrc,
 		linked,
-		slot
+		slot,
+		actions
 	}: {
 		page: ProfileView;
 		/** The page's cover route, without the slot. */
@@ -26,6 +27,8 @@
 		linked: boolean;
 		/** Under each empty place, for the owner's editor. */
 		slot?: Snippet<[number]>;
+		/** At the end of the header: the owner's button that opens the editor. */
+		actions?: Snippet;
 	} = $props();
 
 </script>
@@ -33,12 +36,14 @@
 <header class="who">
 	<Avatar name={page.name} src={avatarSrc} size={6} />
 	<div class="names">
-		<span class="hh-eyebrow">Profile</span>
 		<h1 class="hh-display">{page.name}</h1>
 		{#if page.bio}
 			<p class="bio">{page.bio}</p>
 		{/if}
 	</div>
+	{#if actions}
+		<div class="actions">{@render actions()}</div>
+	{/if}
 </header>
 
 <section aria-labelledby="favourites">
@@ -122,6 +127,23 @@
 		display: grid;
 		gap: 0.2rem;
 		min-width: 0;
+		flex: 1;
+	}
+
+	.actions {
+		flex: none;
+		align-self: flex-start;
+	}
+
+	/* On a phone the button takes a line of its own under the name. */
+	@media (max-width: 40rem) {
+		.who {
+			flex-wrap: wrap;
+		}
+
+		.actions {
+			width: 100%;
+		}
 	}
 
 	h1 {

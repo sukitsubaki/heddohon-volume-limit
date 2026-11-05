@@ -23,6 +23,7 @@ import Database from 'better-sqlite3';
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { config } from './config';
+import { SALT_FILE } from './crypto';
 import { store } from './db';
 import { APP_VERSION } from './version';
 import { zip } from './zip';
@@ -56,6 +57,11 @@ function readme(madeAt: string, kind: string): string {
 		'',
 		'It opens only with the HEDDOHON_SECRET of the server it came from. The',
 		'secret is not in this archive. Keep a copy of it somewhere else.',
+		'',
+		'crypto-salt, when this archive holds it, is the salt every key is derived',
+		'with. Put it in HEDDOHON_DATA_DIR beside heddohon.db. An install made',
+		'before that file existed has none and does not need one; without it, a',
+		'later install cannot open what it sealed.',
 		'',
 		'To restore on SQLite (the default):',
 		'  1. Stop Heddohon.',
@@ -117,11 +123,16 @@ export async function makeBackup(): Promise<Backup> {
 			tables
 		};
 		const text = (value: string) => new TextEncoder().encode(value);
+		// This install's key salt, when it has one, or the archive restores to a
+		// database nothing can open. An install from before the salt has no file,
+		// and its backup restores the way it always did.
+		const salt = await readFile(join(config().dataDir, SALT_FILE)).catch(() => null);
 		return {
 			name: `heddohon-backup-${madeAt.slice(0, 19).replace(/:/g, '-')}Z.zip`,
 			zip: zip(
 				[
 					{ name: 'heddohon.db', data: await readFile(file) },
+					...(salt ? [{ name: SALT_FILE, data: salt }] : []),
 					{ name: 'backup.json', data: text(`${JSON.stringify(manifest, null, '\t')}\n`) },
 					{ name: 'README.txt', data: text(readme(madeAt, database.kind)) }
 				],

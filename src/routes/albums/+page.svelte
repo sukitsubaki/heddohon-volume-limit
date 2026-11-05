@@ -46,7 +46,6 @@
 <div class="page">
 	<header>
 		<div>
-			<span class="hh-eyebrow">Library</span>
 			<h1>Albums</h1>
 			<!-- The way to genres on a phone, where the rail has no room for it. -->
 			<a class="to-genres" href="/genres">
@@ -86,7 +85,7 @@
 			label="Album pages"
 		/>
 	{:else}
-		<p class="empty hh-muted">No albums matched this view.</p>
+		<p class="empty hh-muted">No albums matched this view</p>
 	{/if}
 </div>
 

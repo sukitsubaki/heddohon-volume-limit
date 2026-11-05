@@ -70,7 +70,6 @@
 			live = false;
 		};
 	});
-	const releasesIndex = $derived((popular.length > 0 ? 1 : 0) + groups.length);
 </script>
 
 <svelte:head>
@@ -83,7 +82,6 @@
 			<Cover coverArt={artist.coverArt} size={384} alt="Photo of {artist.name}" rounded />
 		</div>
 		<div class="details" {@attach sweep}>
-			<span class="hh-eyebrow">Artist</span>
 			<HeroTitle text={artist.name} max={3.25} />
 			<p class="meta hh-numeric hh-muted">
 				{albums.length} release{albums.length === 1 ? '' : 's'}{#if span}<span class="dot" aria-hidden="true">·</span>{span}{/if}
@@ -114,20 +112,19 @@
 			{#if latest}
 				<FeaturedRelease
 					album={latest}
-					eyebrow="Latest release"
 					onplay={() => playContainer('album', latest.id)}
 				/>
 			{/if}
 			<section class="popular">
-				<SectionHeader title="Popular" eyebrow="Most played" index={1} />
+				<SectionHeader title="Popular" />
 				<TrackList songs={popular} variant="artwork" showAlbum={!latest} showQuality={false} />
 			</section>
 		</div>
 	{/if}
 
-	{#each groups as group, position (group.kind)}
+	{#each groups as group (group.kind)}
 		<section>
-			<SectionHeader title={group.title} index={(popular.length > 0 ? 2 : 1) + position} />
+			<SectionHeader title={group.title} />
 			<MediaGrid density={data.settings.gridSize}>
 				{#each group.albums as album (album.id)}
 					<MediaCard
@@ -145,7 +142,7 @@
 	{/each}
 
 	{#if appearing.length > 0}
-		<MediaShelf title="Appears on" eyebrow="Other artists' albums" index={releasesIndex + 1} density="compact">
+		<MediaShelf title="Appears on" density="compact">
 			{#each appearing as album (album.id)}
 				<MediaCard
 					href="/albums/{album.id}"
@@ -164,8 +161,6 @@
 			<!-- Compact: a suggestion is secondary to the page it sits under. -->
 			<MediaShelf
 				title="You might like"
-				eyebrow="Related artists"
-				index={releasesIndex + (appearing.length > 0 ? 1 : 0) + 1}
 				density="compact"
 			>
 				{#each similar as suggestion (suggestion.id)}

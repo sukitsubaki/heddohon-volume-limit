@@ -15,15 +15,11 @@
 	 */
 	let {
 		title,
-		index = null,
-		eyebrow = null,
 		href = null,
 		density = 'comfortable',
 		children
 	}: {
 		title: string;
-		index?: number | null;
-		eyebrow?: string | null;
 		href?: string | null;
 		density?: 'compact' | 'comfortable';
 		children: Snippet;
@@ -56,7 +52,7 @@
 </script>
 
 <section class="shelf">
-	<SectionHeader {title} {index} {eyebrow} {href}>
+	<SectionHeader {title} {href}>
 		{#snippet actions()}
 			{#if !(atStart && atEnd)}
 				<div class="paging">

@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import pg from 'pg';
 import { config } from './config';
+import { settleKeySalt } from './crypto';
 import { log, reason } from './log';
 
 export interface AccountRow {
@@ -576,12 +577,27 @@ export async function closeStore(): Promise<void> {
 /** The database, opened (and on PostgreSQL, created and imported into) once. */
 export function store(): Promise<Store> {
 	if (!opening) {
-		opening = open().catch((err) => {
-			// Not cached as a failure: a database still starting beside this
-			// container is tried again on the next request.
-			opening = null;
-			throw err;
-		});
+		opening = open()
+			.then(async (database) => {
+				// Before anything can derive a key: the salt is read from this
+				// database (`crypto.ts`). A refusal closes it again, so the next
+				// request opens it afresh.
+				try {
+					await settleKeySalt(database);
+				} catch (err) {
+					const close = closeOpen;
+					closeOpen = null;
+					await close?.().catch(() => {});
+					throw err;
+				}
+				return database;
+			})
+			.catch((err) => {
+				// Not cached as a failure: a database still starting beside this
+				// container is tried again on the next request.
+				opening = null;
+				throw err;
+			});
 	}
 	return opening;
 }

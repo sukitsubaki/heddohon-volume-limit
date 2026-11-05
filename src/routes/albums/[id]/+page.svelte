@@ -108,7 +108,6 @@
 		</div>
 
 		<div class="details" {@attach sweep}>
-			<span class="hh-eyebrow">Album</span>
 			<HeroTitle text={album.name} />
 
 			{#if album.artist}
@@ -127,16 +126,33 @@
 				{/each}
 			</p>
 
-			{#if releaseQuality || page.data.ratings}
-				<div class="badge-row">
-					{#if releaseQuality}
-						<QualityBadge quality={releaseQuality} />
-					{/if}
-					{#if page.data.ratings}
-						<RatingStars id={album.id} kind="album" rating={album.rating} />
-					{/if}
-				</div>
-			{/if}
+			<div class="badge-row">
+				{#if releaseQuality}
+					<QualityBadge quality={releaseQuality} />
+				{/if}
+				{#if page.data.ratings}
+					<RatingStars id={album.id} kind="album" rating={album.rating} />
+				{/if}
+				<FavouriteButton id={album.id} kind="album" starred={album.starred} size={20} labelled />
+				{#if page.data.sharing}
+					<button
+						class="share"
+						onclick={() =>
+							shareComposer.open({
+								kind: 'album',
+								id: album.id,
+								title: album.name,
+								subtitle: album.artist,
+								coverArt: album.coverArt
+							})}
+						aria-label="Share a link to this album"
+						title="Share"
+					>
+						<Icon name="share" size={18} />
+						<span class="share-label" aria-hidden="true">share</span>
+					</button>
+				{/if}
+			</div>
 
 			<div class="actions">
 				<button
@@ -180,31 +196,13 @@
 					<span class="label">Add to playlist</span>
 				</button>
 				<MixButton of="album" id={album.id} />
-				{#if page.data.sharing}
-					<button
-						class="hh-button"
-						onclick={() =>
-							shareComposer.open({
-								kind: 'album',
-								id: album.id,
-								title: album.name,
-								subtitle: album.artist,
-								coverArt: album.coverArt
-							})}
-						aria-label="Share a link to this album"
-						title="Share"
-					>
-						<Icon name="share" size={16} />
-						<span class="label">Share</span>
-					</button>
-				{/if}
-				<FavouriteButton id={album.id} kind="album" starred={album.starred} size={20} labelled />
 			</div>
 		</div>
 	</header>
 
 	<section class="tracks">
-		<TrackList songs={album.songs} variant="numbered" groupByDisc />
+		<!-- A row carries what differs from the album: the header says the rest. -->
+		<TrackList songs={album.songs} variant="numbered" groupByDisc albumArtist={album.artist} showQuality={!releaseQuality} />
 	</section>
 
 	<!--
@@ -215,8 +213,7 @@
 		{#if artistAlbums.length > 0 && album.artist && album.artistId}
 			<section>
 				<SectionHeader
-					title={album.artist}
-					eyebrow="More from"
+					title="More from {album.artist}"
 					href="/artists/{album.artistId}"
 				/>
 				<MediaGrid density="compact" wholeRows>
@@ -245,7 +242,7 @@
 	{#await data.similar then similar}
 		{#if similar.length > 0}
 			<section>
-				<SectionHeader title="You might like" eyebrow="Related" />
+				<SectionHeader title="You might like" />
 				<!-- Compact: a suggestion is secondary to the page it is under. -->
 				<MediaGrid density="compact" wholeRows>
 					{#each similar as suggestion (suggestion.id)}
@@ -407,6 +404,65 @@
 		margin-top: var(--space-1);
 	}
 
+	.share {
+		display: grid;
+		place-items: center;
+		padding: 0.3rem;
+		border-radius: var(--r-sm);
+		color: var(--text-faint);
+		transition: color var(--transition);
+	}
+
+	.share:hover {
+		color: var(--text-default);
+		filter: var(--glow-icon);
+	}
+
+	.share-label {
+		display: none;
+	}
+
+	/* The word between brackets, beside Favourite (see FavouriteButton). */
+	:global([data-theme='terminal']) .share {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.5rem 0.125rem;
+		border-radius: 0;
+		color: var(--text-strong);
+		font-size: 0.875rem;
+		white-space: nowrap;
+	}
+
+	:global([data-theme='terminal']) .share-label {
+		display: inline;
+	}
+
+	:global([data-theme='terminal']) .share::before,
+	:global([data-theme='terminal']) .share::after {
+		color: var(--text-faint);
+		transition: color var(--transition);
+	}
+
+	:global([data-theme='terminal']) .share::before {
+		content: '[';
+		content: '[' / '';
+		margin-right: -0.35rem;
+	}
+
+	:global([data-theme='terminal']) .share::after {
+		content: ']';
+		content: ']' / '';
+		margin-left: -0.35rem;
+	}
+
+	:global([data-theme='terminal']) .share:hover,
+	:global([data-theme='terminal']) .share:focus-visible,
+	:global([data-theme='terminal']) .share:hover::before,
+	:global([data-theme='terminal']) .share:hover::after {
+		color: var(--accent);
+	}
+
 	.actions {
 		display: flex;
 		align-items: center;
@@ -429,38 +485,22 @@
 		padding: 0;
 	}
 
+	/*
+	 * Stacked, the text sits below the sleeve, and all of it is centred. The
+	 * rating row and the buttons are flex rows, which `text-align` does not
+	 * reach: left at the start, Terminal's rating row at 390px stood 38px off the
+	 * centre of the sleeve above it.
+	 */
 	@media (max-width: 52rem) {
 		.hero {
 			grid-template-columns: minmax(0, 1fr);
 			gap: var(--space-4);
-		}
-
-		.art {
-			max-width: 13rem;
-		}
-
-		/* Stacked, the text sits below the sleeve and nothing can overlap it. */
-	}
-
-	/*
-	 * A phone: glyphs only. With labels the four buttons and the heart wrapped
-	 * onto two rows. Each button carries its name in `aria-label` and `title`.
-	 * 44px squares, the size a finger needs, with play round and in the accent.
-	 */
-	/*
-	 * On a phone the sleeve is centred and as wide as it can be while the title
-	 * and the play button still show under it on arrival, with the text centred
-	 * beneath. Left-aligned at 13rem it filled half the width of an iPhone.
-	 */
-	@media (max-width: 36rem) {
-		.hero {
 			justify-items: center;
 			text-align: center;
 		}
 
 		.art {
-			width: min(100%, 17rem);
-			max-width: none;
+			width: min(100%, 13rem);
 		}
 
 		/* The full width, stretched: a size container has no width of its own to
@@ -471,8 +511,25 @@
 			justify-items: center;
 		}
 
+		.badge-row,
 		.actions {
 			justify-content: center;
+		}
+	}
+
+	/*
+	 * A phone: glyphs only. With labels the four buttons and the heart wrapped
+	 * onto two rows. Each button carries its name in `aria-label` and `title`.
+	 * 44px squares, the size a finger needs, with play round and in the accent.
+	 */
+	/*
+	 * On a phone the sleeve is as wide as it can be while the title and the play
+	 * button still show under it on arrival. At 13rem it filled half the width
+	 * of an iPhone.
+	 */
+	@media (max-width: 36rem) {
+		.art {
+			width: min(100%, 17rem);
 		}
 
 		.actions .label {
@@ -514,7 +571,7 @@
 	}
 
 	:global([data-theme='terminal']) .actions {
-		gap: var(--space-1) var(--space-4);
+		gap: var(--space-1) var(--space-3);
 	}
 
 	:global([data-theme='terminal']) .actions .hh-button {
@@ -547,6 +604,27 @@
 			margin-inline-end: 0;
 			border-color: transparent;
 			border-radius: var(--r-md);
+		}
+
+		/* A key beside the heart's (see FavouriteButton). As the word between
+		   brackets it was the one thing that did not fit the rating's row at
+		   390px, and stood alone on a line under it. */
+		:global([data-theme='terminal']) .share {
+			justify-content: center;
+			width: 2.75rem;
+			height: 2.75rem;
+			padding: 0;
+			border: 1px solid var(--border-strong);
+			border-radius: var(--r-sm);
+		}
+
+		:global([data-theme='terminal']) .share-label {
+			display: none;
+		}
+
+		:global([data-theme='terminal']) .share::before,
+		:global([data-theme='terminal']) .share::after {
+			content: none;
 		}
 	}
 </style>

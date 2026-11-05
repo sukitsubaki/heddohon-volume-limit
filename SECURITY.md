@@ -307,6 +307,14 @@ later, the first to sign the link token it sends through last.fm.
   from Heddohon's address, so a token per request would lock the endpoint.
   A password change misses the cache and signs in afresh. A token Navidrome
   refuses is replaced once.
+- **A restored queue reads Navidrome's own `/api/song`**, through the same
+  session token, for up to 100 song ids a request (`songsByIds` in
+  `navidrome.ts`): 1000 saved tracks cost one sign-in and 10 requests instead
+  of 1000 `getSong` calls. The ids are the account's own saved queue and the
+  answer is read with the account's token; nothing from it is stored. A batch
+  that fails, and a sign-in Navidrome refuses or limits, falls back to the
+  per-id Subsonic calls. The endpoint is Navidrome's interface API, not a
+  documented one, checked against 0.64.2 on 2026-11-04.
 - **The Last.fm return is a GET that changes state upstream.** last.fm sends
   the browser to `/settings/lastfm` with its token, beside Navidrome's signed
   link token (`uid`, valid 5 minutes, naming the Navidrome user) and a `state`
@@ -491,7 +499,17 @@ accounts and open nothing.
 ## Credentials at rest
 
 - Upstream credentials are sealed with **AES-256-GCM** before they reach the database.
-- Keys are derived with **scrypt** (N = 2¹⁵, r = 8, p = 1) from `HEDDOHON_SECRET`.
+- Keys are derived with **scrypt** (N = 2¹⁵, r = 8, p = 1) from `HEDDOHON_SECRET`
+  and a salt of the install's own: 32 random bytes in `crypto-salt` in the data
+  directory, made on the first start whose database holds no account, written
+  0600, never regenerated, and packed into a database backup beside
+  `heddohon.db`. The database records which salt sealed it (a row in `meta`
+  holding a SHA-256 of the salt, or `constant`), on SQLite and PostgreSQL alike.
+  An install whose database already held accounts when this was added keeps the
+  constant salt it was written with, rather than being locked out. A salt file
+  that is missing, cannot be parsed, or does not match that record is refused
+  at start, never replaced: the server answers 500 and `/healthz` reports
+  `misconfigured` until the right `crypto-salt` is restored.
   Separate keys cover encryption, session digests, share-link digests,
   known-device cookies, Last.fm link state, cast addresses, the comparison
   of the Navidrome plugin's token and MCP token digests.
@@ -1134,8 +1152,10 @@ each on, the albums it played lately and its most played artists of the last
   and artists do not link into the library.
 - **The public link** is `hhpr_` and 43 random characters, stored as an HMAC
   under a key of its own, shown once as it is made; a new one replaces it.
-  The public page has the owner's name (the user name where no display name
-  is set), picture, bio, albums and the lists the owner turned on, with
+  The public page has the owner's display name, `Listener` where none is set
+  (the user name signs in to the music server and to Heddohon, so a link held
+  by anyone does not carry it), picture, bio, albums and the lists the owner
+  turned on, with
   `noindex`, without the handle and without links into the library. Its
   covers carry `private, max-age=300`, its picture the same.
 - **What ends it.** A password change seen at sign-in (on Subsonic, also how
@@ -1532,6 +1552,13 @@ Covers are cached under `$HEDDOHON_DATA_DIR/covers` (see
   outlives its request. Stopping it, or `destroyAllSessions` for the account
   (a rejected or changed credential), ends it. On Jellyfin it fills only the
   administrator's own entries, since the key carries the viewer.
+- **A request from another site is served, not stored.** `Sec-Fetch-Site`
+  decides: `same-origin`, `none` (a typed or bookmarked navigation) and a
+  request without the header are kept; `cross-site` and `same-site` are not.
+  The cookie is `SameSite=Lax`, so a cross-site navigation arrives signed in,
+  and another site could otherwise fill the cache with covers of its choosing.
+  The cover is still served: refusing it would answer whether the visitor is
+  signed in.
 - **Kept filled, the server starts a fill itself.** An administrator can switch
   on "Keep it filled" (`PUT /api/cover-fill`, the same gate). The server then
   starts a fill once a day and after a restart, with no request behind it, by
@@ -1763,10 +1790,6 @@ session token and any `u`, `t`, `s` or `p` query parameter.
   are admitted unconditionally. Script execution is not affected. Removing it
   means moving those values out of markup and into the stylesheet.
 
-- **Revocation on upstream rejection** covers page loads and media. Twelve JSON
-  handlers are still missing it: songs, lyrics, playback, tracks, star, the
-  playlist routes and the song lookup before a download. They answer 401 or 502
-  and the next page load or media request ends the sessions.
 - **A reused Navidrome user name** keeps the earlier user's links, settings
   and queue. If a Subsonic user is deleted and the name given to someone else,
   the earlier user's sessions end when the new user signs in (see
@@ -1790,8 +1813,6 @@ session token and any `u`, `t`, `s` or `p` query parameter.
   Trusted Web Activity) and takes passkeys as Chrome does.
 - **Upstream redirects from http to https** are followed to any port on the
   same host, so that Jellyfin's 8096 to 8920 upgrade works.
-- **`GET /api/cover/[id]`** writes to the cache and sits outside the origin check.
-- **The scrypt salt** is a constant shared by every deployment.
 - **A cover that misses the cache** is read into memory before its size is checked.
 - **A listen-together link can still be filled for visitors without an
   account** by someone holding it from many addresses, or from one address

@@ -501,7 +501,6 @@
 					</p>
 				{:else}
 					<h2 class="title">Nothing playing</h2>
-					<p class="album hh-muted">Pick something from your library</p>
 				{/if}
 				<!-- While this browser hosts listening together: who is with it, and
 				     the way back to the link. -->
@@ -576,7 +575,9 @@
 			/>
 			<div class="times">
 				<span class="hh-numeric">{formatDuration(player.currentTime)}</span>
-				{#if song && !song.live && showQualityBadge}
+				{#if player.notice}
+					<span class="notice hh-truncate" role="status">{player.notice}</span>
+				{:else if song && !song.live && showQualityBadge}
 					<!--
 						The badge is also the switch. Pressing it asks the music server
 						to convert instead of sending the file, and pressing it again
@@ -633,18 +634,19 @@
 				class="play"
 				onclick={() => player.toggle()}
 				disabled={!song}
-				aria-label={player.playing ? 'Pause' : 'Play'}
-				title={player.playing ? 'Pause' : 'Play'}
+				aria-label={player.running ? 'Pause' : 'Play'}
+				aria-busy={player.buffering}
+				title={player.running ? 'Pause' : 'Play'}
 			>
-				{#if player.loading && player.playing}
+				{#if player.buffering}
 					<span class="spinner" aria-hidden="true"></span>
 				{:else}
 					<!-- Both glyphs are drawn, one over the other, and the one not wanted
 					     shrinks away as the other grows in. Heavier than the set's
 					     default: at 34px the standard 2px stroke reads as a hairline
 					     beside the artwork. -->
-					<span class="glyph" class:on={!player.playing}><Icon name="play" size={34} strokeWidth={3.4} /></span>
-					<span class="glyph" class:on={player.playing}><Icon name="pause" size={34} strokeWidth={3.4} /></span>
+					<span class="glyph" class:on={!player.running}><Icon name="play" size={34} strokeWidth={3.4} /></span>
+					<span class="glyph" class:on={player.running}><Icon name="pause" size={34} strokeWidth={3.4} /></span>
 				{/if}
 			</button>
 
@@ -654,7 +656,7 @@
 					skipGlyph(event.currentTarget, 1);
 					void player.next();
 				}}
-				disabled={!player.hasQueue}
+				disabled={!player.canNext}
 				aria-label="Next track"
 				title="Next"
 			>
@@ -770,10 +772,6 @@
 						{/if}
 					</div>
 					{#if !audioOutputs.named}
-						<p class="output-note hh-muted">
-							This browser names your outputs once Heddohon may use the microphone. Nothing is
-							recorded: the microphone is closed as soon as the list is read.
-						</p>
 						<div>
 							<button
 								class="chip"
@@ -1311,7 +1309,6 @@
 		margin: 0;
 		font-size: 1.375rem;
 		line-height: 1.15;
-		letter-spacing: -0.015em;
 	}
 
 	.artist,
@@ -1473,6 +1470,14 @@
 
 	.times .right {
 		text-align: right;
+	}
+
+	/* Where the quality badge is, so a message moves nothing on the panel. The
+	   middle track is `auto`, so the width has to be capped here. */
+	.notice {
+		max-width: 11rem;
+		color: var(--text-default);
+		text-align: center;
 	}
 
 	/* ── Transport ───────────────────────────────────────────────────── */
@@ -1720,7 +1725,7 @@
 		border-radius: 999px;
 		background: var(--accent);
 		color: var(--accent-contrast);
-		font-size: 0.625rem;
+		font-size: 0.6875rem;
 		line-height: 1.05rem;
 		text-align: center;
 	}
@@ -1863,53 +1868,9 @@
 		mask-image: none;
 	}
 
-	/*
-	 * The track as three labelled lines. The labels are drawn by the stylesheet
-	 * beside text that already says what it is to a screen reader (a heading, and
-	 * links to the artist and the album). Only for a track of the library:
-	 * `.rounds` is there for one and not for a station or an empty player.
-	 */
-	:global([data-theme='terminal']) .head:has(.rounds) .title,
-	:global([data-theme='terminal']) .head:has(.rounds) .artist,
-	:global([data-theme='terminal']) .head:has(.rounds) .album {
-		position: relative;
-		padding-left: 3.5rem;
-	}
-
-	:global([data-theme='terminal']) .head:has(.rounds) .title::before,
-	:global([data-theme='terminal']) .head:has(.rounds) .artist::before,
-	:global([data-theme='terminal']) .head:has(.rounds) .album::before {
-		position: absolute;
-		left: 0;
-		color: var(--text-muted);
-		font-size: 0.8125rem;
-		font-weight: 400;
-		letter-spacing: 0;
-	}
-
-	/* Each with an empty alternative text, so it is drawn and not read into the
-	   heading's or the link's line; the plain declaration is for Safari before
-	   17.4. */
-	:global([data-theme='terminal']) .head:has(.rounds) .title::before {
-		content: 'title';
-		content: 'title' / '';
-		top: 0.2rem;
-	}
-
-	:global([data-theme='terminal']) .head:has(.rounds) .artist::before {
-		content: 'artist';
-		content: 'artist' / '';
-	}
-
-	:global([data-theme='terminal']) .head:has(.rounds) .album::before {
-		content: 'album';
-		content: 'album' / '';
-	}
-
 	:global([data-theme='terminal']) .title {
 		font-size: 1.0625rem;
 		line-height: 1.35;
-		letter-spacing: -0.01em;
 	}
 
 	:global([data-theme='terminal']) .artist,
@@ -2006,7 +1967,7 @@
 	   themes light it. */
 	:global([data-theme='terminal']) .row.current .row-title {
 		color: var(--accent);
-		font-weight: 700;
+		font-weight: 600;
 	}
 
 	/* ── Phosphor ────────────────────────────────────────────────────────── */

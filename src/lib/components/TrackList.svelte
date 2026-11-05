@@ -20,6 +20,8 @@
 		showAlbum = false,
 		showQuality = true,
 		groupByDisc = false,
+		/** The album's artist: a row names its artist only where it differs, as on a compilation. */
+		albumArtist = null,
 		/**
 		 * Two columns, read down the first and then the second, once the list
 		 * has 52rem to itself. For a short list of songs from different records,
@@ -35,6 +37,7 @@
 		showAlbum?: boolean;
 		showQuality?: boolean;
 		groupByDisc?: boolean;
+		albumArtist?: string | null;
 		columns?: boolean;
 		onremove?: ((indexes: number[]) => void) | null;
 		/**
@@ -47,6 +50,8 @@
 	} = $props();
 
 	const currentId = $derived(player.current?.id ?? null);
+
+	const credited = (song: Song) => Boolean(song.artist) && song.artist !== albumArtist;
 
 	/*
 	 * Several rows picked at once; see `selection.svelte.ts`. The selection is
@@ -82,7 +87,7 @@
 	function activate(index: number) {
 		const song = songs[index];
 		if (song.id === currentId) {
-			if (player.playing) player.pause();
+			if (player.running) player.pause();
 			else void player.play();
 			return;
 		}
@@ -296,11 +301,12 @@
 						<button
 							class="index hh-numeric"
 							onclick={() => activate(index)}
-							aria-label={isCurrent && player.playing ? `Pause ${song.title}` : `Play ${song.title}`}
+							aria-label={isCurrent && player.running ? `Pause ${song.title}` : `Play ${song.title}`}
 						>
 							<span class="resting">
-								{#if isCurrent && player.playing}
-									<span class="bars" aria-hidden="true">
+								{#if isCurrent && player.running}
+									<!-- Still while the sound is held up: they keep time with the music. -->
+									<span class="bars" class:held={player.buffering} aria-hidden="true">
 										<i></i><i></i><i></i><i></i>
 									</span>
 								{:else if isSelected}
@@ -317,7 +323,7 @@
 						<button
 							class="play-overlay"
 							onclick={() => activate(index)}
-							aria-label={isCurrent && player.playing ? `Pause ${song.title}` : `Play ${song.title}`}
+							aria-label={isCurrent && player.running ? `Pause ${song.title}` : `Play ${song.title}`}
 						></button>
 					{/if}
 				</div>
@@ -325,19 +331,21 @@
 				<div class="meta">
 					<span class="title hh-truncate">{song.title}</span>
 					{#if isSelected}<span class="hh-visually-hidden">Selected</span>{/if}
-					<span class="sub hh-truncate hh-muted">
-						{#if song.artist}
-							<a href={song.artistId ? `/artists/${song.artistId}` : '#'}>
-								{song.artist}
-							</a>
-						{/if}
-						{#if showAlbum && song.album}
-							<span class="sep" aria-hidden="true">·</span>
-							<a href={song.albumId ? `/albums/${song.albumId}` : '#'}>
-								{song.album}
-							</a>
-						{/if}
-					</span>
+					{#if credited(song) || (showAlbum && song.album)}
+						<span class="sub hh-truncate hh-muted">
+							{#if credited(song)}
+								<a href={song.artistId ? `/artists/${song.artistId}` : '#'}>
+									{song.artist}
+								</a>
+							{/if}
+							{#if showAlbum && song.album}
+								{#if credited(song)}<span class="sep" aria-hidden="true">·</span>{/if}
+								<a href={song.albumId ? `/albums/${song.albumId}` : '#'}>
+									{song.album}
+								</a>
+							{/if}
+						</span>
+					{/if}
 				</div>
 
 				{#if showQuality}
@@ -428,7 +436,7 @@
 {/if}
 
 {#if songs.length === 0}
-	<p class="empty hh-muted">Nothing here yet.</p>
+	<p class="empty hh-muted">Nothing here yet</p>
 {/if}
 
 <style>
@@ -669,31 +677,26 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	/* On hover the number lights up in the accent and swells on the spring. */
+	/* On hover the number lights up. */
 	.index .resting {
 		display: grid;
 		place-items: center end;
-		transform-origin: right center;
 		transition:
 			color var(--dur-state) var(--ease-out),
 			text-shadow var(--dur-state) var(--ease-out),
-			filter var(--dur-state) var(--ease-out),
-			scale var(--dur-state) var(--ease-spring);
+			filter var(--dur-state) var(--ease-out);
 	}
 
 	.track:hover .index .resting,
 	.index:focus-visible .resting {
 		color: var(--glow-color);
-		text-shadow:
-			0 0 6px color-mix(in srgb, var(--accent) 70%, transparent),
-			0 0 16px color-mix(in srgb, var(--accent) 45%, transparent);
-		scale: 1.2;
+		text-shadow: var(--glow-text);
 	}
 
 	/* The bars cannot take a text-shadow; they glow as a filter instead. */
 	.track:hover .index .bars,
 	.index:focus-visible .bars {
-		filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 80%, transparent));
+		filter: var(--glow-icon);
 	}
 
 	/* The cover as the play control: transparent over it, and the cover lifts
@@ -746,7 +749,6 @@
 	.title {
 		color: var(--text-strong);
 		font-weight: 500;
-		letter-spacing: -0.005em;
 	}
 
 	.sub {
@@ -824,7 +826,10 @@
 		color: var(--danger);
 	}
 
+	/* The last column, whether or not a row lays out a quality cell or its
+	   actions before it: placed by order, it would move left without them. */
 	.duration {
+		grid-column: -2;
 		text-align: right;
 		color: var(--text-faint);
 	}
@@ -852,6 +857,10 @@
 		background: var(--accent);
 		transform-origin: bottom;
 		animation: bar var(--period) ease-in-out var(--offset) infinite alternate;
+	}
+
+	.bars.held i {
+		animation-play-state: paused;
 	}
 
 	.bars i:nth-child(1) {
@@ -928,28 +937,17 @@
 			display: flex;
 			animation: actions-in var(--dur-hover) var(--ease-out);
 		}
-
-		/* The last column whether or not the actions are laid out. Placed by
-		   order, it moved into the actions' column on every row without them,
-		   60px left of the one row that had them. */
-		.duration {
-			grid-column: -2;
-		}
 	}
 
 	/* ── Terminal ────────────────────────────────────────────────────────────── */
 
 	/*
 	 * Rows as lines of a listing. Hover is a flat step of the ground, with
-	 * nothing in the row moving. The playing row is inverted: the accent as its
-	 * ground and every tone in it the dark one, which the row gets by setting the
-	 * colour tokens for its own contents. `--row-accent` holds the accent for the
-	 * ground, since the row redefines `--accent` for what is inside it.
+	 * nothing in the row moving. The playing row is a step of the ground with its
+	 * title and its number in the accent, as the queue's is. It was the accent
+	 * as the whole row's ground, which on an album of a few tracks was the
+	 * largest area of colour on the screen.
 	 */
-	:global([data-theme='terminal']) .tracks {
-		--row-accent: var(--accent);
-	}
-
 	:global([data-theme='terminal']) .track::before {
 		background: var(--bg-hover);
 		scale: none;
@@ -958,8 +956,8 @@
 
 	/* A picked row is the accent's ground, faint, with its edge. */
 	:global([data-theme='terminal']) .track.selected::before {
-		background: color-mix(in srgb, var(--row-accent) 20%, transparent);
-		box-shadow: inset 3px 0 0 var(--row-accent);
+		background: color-mix(in srgb, var(--accent) 20%, transparent);
+		box-shadow: inset 3px 0 0 var(--accent);
 	}
 
 	:global([data-theme='terminal']) .track:hover .meta {
@@ -987,27 +985,18 @@
 	}
 
 	:global([data-theme='terminal']) .track.current {
-		--accent: var(--accent-contrast);
-		--accent-strong: var(--accent-contrast);
-		--text-strong: var(--accent-contrast);
-		--text-default: var(--accent-contrast);
-		--text-muted: color-mix(in srgb, var(--accent-contrast) 80%, var(--row-accent));
-		--text-faint: color-mix(in srgb, var(--accent-contrast) 80%, var(--row-accent));
-		--glow-color: var(--accent-contrast);
-		--highres: var(--accent-contrast);
-		--border-strong: color-mix(in srgb, var(--accent-contrast) 45%, var(--row-accent));
-		background: var(--row-accent);
+		background: var(--bg-raised);
 		border-top-color: transparent;
 		border-radius: var(--r-sm);
-		color: var(--accent-contrast);
 	}
 
-	:global([data-theme='terminal']) .track.current::before {
-		display: none;
+	:global([data-theme='terminal']) .track.current .title,
+	:global([data-theme='terminal']) .track.current .index {
+		color: var(--accent);
 	}
 
 	:global([data-theme='terminal']) .track.current .title {
-		font-weight: 700;
+		font-weight: 600;
 	}
 
 	/* The row under the playing one has no rule above it: the block ends there. */
@@ -1022,7 +1011,7 @@
 	}
 
 	:global([data-theme='terminal']) .tracks.reorderable > li.dragged .track {
-		box-shadow: inset 0 0 0 1px var(--row-accent);
+		box-shadow: inset 0 0 0 1px var(--accent);
 	}
 
 	/* The bars move in three hard steps. */
